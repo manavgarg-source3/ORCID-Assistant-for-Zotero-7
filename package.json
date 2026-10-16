@@ -1,0 +1,22 @@
+{
+  "name": "zotero-orcid-assistant",
+  "version": "1.0.0",
+  "description": "ORCID Assistant plugin for Zotero 7+",
+  "main": "src/bootstrap.js",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "test": "node scripts/test.js",
+    "package": "npm run build && npm test"
+  },
+  "keywords": [
+    "zotero",
+    "zotero-plugin",
+    "orcid",
+    "bibliography"
+  ],
+  "author": "ORCID Assistant Contributors",
+  "license": "AGPL-3.0-or-later",
+  "devDependencies": {
+    "adm-zip": "^0.5.16"
+  }
+}

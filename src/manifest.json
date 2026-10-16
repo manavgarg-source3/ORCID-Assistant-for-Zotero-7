@@ -1,0 +1,22 @@
+{
+  "manifest_version": 2,
+  "name": "ORCID Assistant",
+  "version": "1.0.0",
+  "description": "Zotero desktop plugin for ORCID integration",
+  "homepage_url": "https://github.com/example/zotero-orcid-assistant",
+  "author": "ORCID Assistant Contributors",
+  "browser_specific_settings": {
+    "zotero": {
+      "id": "orcid-assistant@zotero.org",
+      "strict_min_version": "7.0",
+      "strict_max_version": "20.*"
+    }
+  },
+  "applications": {
+    "zotero": {
+      "id": "orcid-assistant@zotero.org",
+      "strict_min_version": "7.0",
+      "strict_max_version": "20.*"
+    }
+  }
+}
