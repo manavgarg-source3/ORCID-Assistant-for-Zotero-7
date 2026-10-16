@@ -35,6 +35,23 @@ async function startup({ id, version, rootURI }, reason) {
     // Load main plugin logic in the privileged scope
     Services.scriptloader.loadSubScript(rootURI + "orcid-assistant.js");
     ORCIDAssistant.init({ id, version, rootURI });
+
+    // Register API-level hooks (like MenuManager) immediately so they are
+    // ready even before any main window finishes rendering its DOM
+    ORCIDAssistant.addToAllWindows();
+
+    // If starting on cold application launch, wait until Zotero UI is ready
+    // before performing window DOM attachments
+    if (typeof Zotero !== "undefined") {
+      if (Zotero.initializationPromise) {
+        await Zotero.initializationPromise;
+      }
+      if (Zotero.uiReadyPromise) {
+        await Zotero.uiReadyPromise;
+      }
+    }
+
+    // Re-verify window attachment once UI is guaranteed ready
     ORCIDAssistant.addToAllWindows();
     await ORCIDAssistant.main();
     log("Plugin startup finished successfully.");
@@ -97,4 +114,3 @@ function shutdown(data, reason) {
 function uninstall(data, reason) {
   log(`Plugin uninstalled (reason: ${reason})`);
 }
-
