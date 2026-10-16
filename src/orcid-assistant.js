@@ -13,6 +13,7 @@ var ORCIDAssistant = {
   menuManagerContextID: null,
   helperUrl: "http://127.0.0.1:23125",
   fetchImpl: null,
+  mockLibraryItems: null,
 
   /**
    * Initialize plugin state.
@@ -379,13 +380,329 @@ var ORCIDAssistant = {
   },
 
   /**
+   * Normalize a DOI string for comparison.
+   * Strips URL prefixes (https://doi.org/, http://dx.doi.org/), 'doi:' prefix,
+   * trailing punctuation, and normalizes to lowercase.
+   */
+  normalizeDoi(doi) {
+    if (typeof doi !== "string") return null;
+    let d = doi.trim();
+    if (!d) return null;
+    d = d.replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, "");
+    d = d.replace(/^doi:\s*/i, "");
+    d = d.replace(/[/\s.]+$/, "");
+    d = d.toLowerCase();
+    return d.length > 0 ? d : null;
+  },
+
+  /**
+   * Normalize a publication title for fuzzy matching.
+   * Lowercases, removes HTML tags, strips punctuation, and collapses whitespace.
+   */
+  normalizeTitle(title) {
+    if (typeof title !== "string") return "";
+    let t = title.toLowerCase();
+    t = t.replace(/<[^>]+>/g, " ");
+    t = t.replace(/[^\p{L}\p{N}\s]/gu, " ");
+    t = t.replace(/\s+/g, " ").trim();
+    return t;
+  },
+
+  /**
+   * Check if two titles match using normalized equality or significant token overlap.
+   */
+  titlesMatch(titleA, titleB) {
+    const normA = this.normalizeTitle(titleA);
+    const normB = this.normalizeTitle(titleB);
+    if (!normA || !normB) return false;
+    if (normA === normB) return true;
+
+    // Token set overlap (Jaccard >= 0.8 or Dice >= 0.85)
+    const tokensA = new Set(normA.split(" ").filter(w => w.length > 2));
+    const tokensB = new Set(normB.split(" ").filter(w => w.length > 2));
+    if (tokensA.size === 0 || tokensB.size === 0) return normA === normB;
+
+    let intersection = 0;
+    for (const token of tokensA) {
+      if (tokensB.has(token)) intersection++;
+    }
+    const union = new Set([...tokensA, ...tokensB]).size;
+    const jaccard = union > 0 ? intersection / union : 0;
+    const dice = (tokensA.size + tokensB.size > 0) ? (2 * intersection) / (tokensA.size + tokensB.size) : 0;
+
+    return jaccard >= 0.8 || dice >= 0.85;
+  },
+
+  /**
+   * Extract a 4-digit publication year from a string or number.
+   */
+  extractYear(dateVal) {
+    if (dateVal === null || dateVal === undefined) return null;
+    const match = String(dateVal).match(/\b(1[7-9]\d\d|20\d\d)\b/);
+    return match ? match[1] : null;
+  },
+
+  /**
+   * Extract normalized lowercase author tokens / family names.
+   */
+  extractAuthorTokens(authors) {
+    if (!authors) return [];
+    let authorList = [];
+    if (Array.isArray(authors)) {
+      authorList = authors;
+    } else if (typeof authors === "string") {
+      authorList = authors.split(/[,;&]|\band\b/i);
+    }
+    const tokens = [];
+    for (const a of authorList) {
+      if (typeof a !== "string") continue;
+      const parts = a.replace(/[^\p{L}\s]/gu, " ").trim().toLowerCase().split(/\s+/);
+      for (const p of parts) {
+        if (p.length > 2) {
+          tokens.push(p);
+        }
+      }
+    }
+    return tokens;
+  },
+
+  /**
+   * Check if author metadata overlaps between two records.
+   * Returns matching token if found, false if both have author info but no overlap,
+   * or null if author info is unavailable on either record.
+   */
+  authorsMatch(authorsA, authorsB) {
+    const tokensA = this.extractAuthorTokens(authorsA);
+    const tokensB = this.extractAuthorTokens(authorsB);
+    if (tokensA.length === 0 || tokensB.length === 0) return null;
+    for (const t of tokensA) {
+      if (tokensB.includes(t)) {
+        return t;
+      }
+    }
+    return false;
+  },
+
+  /**
+   * Retrieve items from the local Zotero library (strictly read-only).
+   * Supports injecting mockLibraryItems for testing.
+   */
+  async getLocalLibraryItems(libraryID) {
+    if (Array.isArray(this.mockLibraryItems)) {
+      return this.mockLibraryItems;
+    }
+
+    try {
+      if (typeof Zotero === "undefined" || !Zotero.Items || typeof Zotero.Items.getAll !== "function") {
+        return [];
+      }
+
+      let targetLibraryID = libraryID;
+      if (!targetLibraryID) {
+        if (Zotero.getActiveZoteroPane && typeof Zotero.getActiveZoteroPane === "function") {
+          try {
+            targetLibraryID = Zotero.getActiveZoteroPane()?.getSelectedLibraryID();
+          } catch (e) {}
+        }
+        if (!targetLibraryID && Zotero.Libraries) {
+          targetLibraryID = Zotero.Libraries.userLibraryID;
+        }
+        if (!targetLibraryID) {
+          targetLibraryID = 1;
+        }
+      }
+
+      const rawItems = await Zotero.Items.getAll(targetLibraryID, true, false);
+      if (!Array.isArray(rawItems)) return [];
+
+      const regularItems = rawItems.filter(item => {
+        if (!item) return false;
+        if (typeof item.isRegularItem === "function") {
+          return item.isRegularItem();
+        }
+        const isNote = typeof item.isNote === "function" ? item.isNote() : false;
+        const isAttachment = typeof item.isAttachment === "function" ? item.isAttachment() : false;
+        return !isNote && !isAttachment;
+      });
+
+      return regularItems.map(item => {
+        const title = (typeof item.getField === "function") ? item.getField("title") : (item.title || "");
+        const doi = (typeof item.getField === "function") ? (item.getField("DOI") || item.getField("doi")) : (item.DOI || item.doi || "");
+        const dateVal = (typeof item.getField === "function") ? (item.getField("date") || item.getField("year")) : (item.date || item.year || "");
+        let authors = [];
+        if (typeof item.getCreators === "function") {
+          const creators = item.getCreators() || [];
+          for (const c of creators) {
+            const name = c.lastName || c.name || `${c.firstName || ""} ${c.lastName || ""}`.trim();
+            if (name) authors.push(name);
+          }
+        } else if (Array.isArray(item.creators)) {
+          authors = item.creators.map(c => c.lastName || c.name || String(c)).filter(Boolean);
+        } else if (item.author) {
+          authors = [item.author];
+        }
+
+        return {
+          id: item.id || null,
+          key: item.key || null,
+          title: title || "",
+          doi: doi || null,
+          date: dateVal || "",
+          year: this.extractYear(dateVal),
+          authors,
+          author: authors.join(", "),
+          rawItem: item
+        };
+      });
+    } catch (err) {
+      this.logError(err);
+      return [];
+    }
+  },
+
+  /**
+   * Perform duplicate detection against local Zotero library items.
+   *
+   * Logic hierarchy:
+   * 1. Strongest match: Normalized DOI match -> "Already in Zotero"
+   * 2. Secondary match: When DOI is missing on one/both, normalized title + matching year
+   *    and author metadata -> "Possible Duplicate"
+   * 3. No match or title-only similarity without matching year/author -> "New"
+   */
+  detectDuplicates(orcidWorks, localLibraryItems = []) {
+    if (!Array.isArray(orcidWorks)) return [];
+    const items = Array.isArray(localLibraryItems) ? localLibraryItems : [];
+
+    // Map normalized DOIs from local library for O(1) lookup
+    const localDoiMap = new Map();
+    for (const item of items) {
+      const normDoi = this.normalizeDoi(item.doi);
+      if (normDoi) {
+        localDoiMap.set(normDoi, item);
+      }
+    }
+
+    return orcidWorks.map(work => {
+      const workDoi = this.normalizeDoi(work.doi);
+      const workYear = this.extractYear(work.year);
+
+      // 1. Check normalized DOI (strongest match)
+      if (workDoi && localDoiMap.has(workDoi)) {
+        const matched = localDoiMap.get(workDoi);
+        return {
+          ...work,
+          duplicateStatus: "Already in Zotero",
+          matchType: "DOI",
+          matchReason: `Matched DOI: ${workDoi}`,
+          matchedItem: {
+            id: matched.id,
+            key: matched.key,
+            title: matched.title,
+            doi: matched.doi,
+            year: matched.year,
+            author: matched.author
+          }
+        };
+      }
+
+      // 2. Check title + year + author against local items
+      for (const item of items) {
+        if (this.titlesMatch(work.title, item.title)) {
+          const itemYear = this.extractYear(item.year || item.date);
+          const authorMatch = this.authorsMatch(
+            work.authors || work.author,
+            item.authors || item.author
+          );
+
+          // Case A: Both have year and years match
+          if (workYear && itemYear && workYear === itemYear) {
+            // If both have author info and they conflict, don't mark as duplicate
+            if (authorMatch === false) {
+              continue;
+            }
+            const authorDetail = typeof authorMatch === "string"
+              ? ` & author (${authorMatch})`
+              : "";
+            return {
+              ...work,
+              duplicateStatus: "Possible Duplicate",
+              matchType: "TITLE_YEAR",
+              matchReason: `Title & year (${workYear})${authorDetail} match local item`,
+              matchedItem: {
+                id: item.id,
+                key: item.key,
+                title: item.title,
+                doi: item.doi,
+                year: itemYear,
+                author: item.author
+              }
+            };
+          }
+
+          // Case B: Year is missing on one or both, but author matches
+          if ((!workYear || !itemYear) && typeof authorMatch === "string") {
+            return {
+              ...work,
+              duplicateStatus: "Possible Duplicate",
+              matchType: "TITLE_AUTHOR",
+              matchReason: `Title & author (${authorMatch}) match local item (year unavailable)`,
+              matchedItem: {
+                id: item.id,
+                key: item.key,
+                title: item.title,
+                doi: item.doi,
+                year: itemYear,
+                author: item.author
+              }
+            };
+          }
+
+          // Case C: Title matches, but years differ or both year & author are missing:
+          // Rule: "Do not treat title-only similarity as a confirmed duplicate."
+          // Remains candidate for New unless another item matches.
+        }
+      }
+
+      // 3. No match found in local library
+      return {
+        ...work,
+        duplicateStatus: "New",
+        matchType: null,
+        matchReason: "No match found in local Zotero library",
+        matchedItem: null
+      };
+    });
+  },
+
+  /**
+   * Compute duplicate summary statistics.
+   */
+  computeDuplicateStats(works = []) {
+    let alreadyCount = 0;
+    let possibleCount = 0;
+    let newCount = 0;
+    for (const w of works) {
+      if (w.duplicateStatus === "Already in Zotero") {
+        alreadyCount++;
+      } else if (w.duplicateStatus === "Possible Duplicate") {
+        possibleCount++;
+      } else {
+        newCount++;
+      }
+    }
+    return { alreadyCount, possibleCount, newCount };
+  },
+
+  /**
    * Format fetched works into a clean, read-only preview text.
+   * Displays title, author, year, DOI, type, and duplicate detection status.
    */
   formatWorksPreview(data) {
     const payload = data?.data || data || {};
     const orcid = payload.orcid || data?.orcid || "N/A";
     const total = payload.totalWorks ?? data?.totalWorks ?? (payload.works?.length || 0);
     const works = Array.isArray(payload.works) ? payload.works : (Array.isArray(data?.works) ? data.works : []);
+    const stats = payload.duplicateStats || data?.duplicateStats || this.computeDuplicateStats(works);
 
     let lines = [];
     lines.push("==================================================");
@@ -393,6 +710,9 @@ var ORCIDAssistant = {
     lines.push("==================================================");
     lines.push(`ORCID iD:    ${orcid}`);
     lines.push(`Total Works: ${total}`);
+    if (works.length > 0) {
+      lines.push(`Detection:   ${stats.alreadyCount} Already in Zotero | ${stats.possibleCount} Possible Duplicate | ${stats.newCount} New`);
+    }
     lines.push("--------------------------------------------------");
 
     if (works.length === 0) {
@@ -401,12 +721,17 @@ var ORCIDAssistant = {
       const previewLimit = Math.min(works.length, 10);
       for (let i = 0; i < previewLimit; i++) {
         const w = works[i];
-        lines.push(`[${i + 1}] Title: ${w.title || "(Untitled)"}`);
-        lines.push(`    Year:  ${w.year || "Not specified"}`);
-        lines.push(`    DOI:   ${w.doi || "None"}`);
-        lines.push(`    Type:  ${w.type || "work"}`);
-        if (w.journalTitle) {
-          lines.push(`    Venue: ${w.journalTitle}`);
+        const statusLabel = w.duplicateStatus || "New";
+        const authorsText = w.author || (Array.isArray(w.authors) && w.authors.length > 0 ? w.authors.join(", ") : "Not specified");
+
+        lines.push(`[${i + 1}] [${statusLabel}]`);
+        lines.push(`    Title:   ${w.title || "(Untitled)"}`);
+        lines.push(`    Authors: ${authorsText}`);
+        lines.push(`    Year:    ${w.year || "Not specified"}`);
+        lines.push(`    DOI:     ${w.doi || "None"}`);
+        lines.push(`    Type:    ${w.type || "work"}`);
+        if (w.matchReason && statusLabel !== "New") {
+          lines.push(`    Match:   ${w.matchReason}`);
         }
         lines.push("");
       }
@@ -416,15 +741,15 @@ var ORCIDAssistant = {
     }
 
     lines.push("==================================================");
-    lines.push("READ-ONLY PREVIEW: No items were imported, modified,");
-    lines.push("or deleted in your Zotero library.");
+    lines.push("READ-ONLY PREVIEW: No items were imported, created,");
+    lines.push("modified, edited, deleted, or pushed in your Zotero library.");
     lines.push("==================================================");
 
     return lines.join("\n");
   },
 
   /**
-   * Interactive UI flow: prompt for ORCID iD, query helper, and display preview.
+   * Interactive UI flow: prompt for ORCID iD, query helper, detect duplicates, and display preview.
    */
   async promptFetchPublicWorks(window, initialValue = "") {
     let promptService = (typeof Services !== "undefined" && Services.prompt) ? Services.prompt : null;
@@ -511,6 +836,17 @@ var ORCIDAssistant = {
         if (retryAfterError) continue;
         return;
       }
+
+      // Perform duplicate detection against local Zotero library (read-only)
+      const localItems = await this.getLocalLibraryItems();
+      const rawWorks = Array.isArray(result.works)
+        ? result.works
+        : (Array.isArray(result.data?.works) ? result.data.works : []);
+      const annotatedWorks = this.detectDuplicates(rawWorks, localItems);
+      const duplicateStats = this.computeDuplicateStats(annotatedWorks);
+
+      result.works = annotatedWorks;
+      result.duplicateStats = duplicateStats;
 
       // Success: Display read-only preview
       const previewText = this.formatWorksPreview(result);

@@ -221,8 +221,8 @@ try {
       orcid: '0000-0002-1825-0097',
       totalWorks: 2,
       works: [
-        { title: 'Graph Theory & Citation Networks', year: '2023', doi: '10.1000/182', type: 'journal-article' },
-        { title: 'Open Science Practices', year: '2021', doi: null, type: 'book' }
+        { title: 'Graph Theory & Citation Networks', year: '2023', doi: '10.1000/182', type: 'journal-article', author: 'Josiah Carberry', duplicateStatus: 'Already in Zotero', matchReason: 'Matched DOI: 10.1000/182' },
+        { title: 'Open Science Practices', year: '2021', doi: null, type: 'book', author: 'Ada Lovelace', duplicateStatus: 'New' }
       ]
     };
 
@@ -230,8 +230,11 @@ try {
     assert(preview.includes('0000-0002-1825-0097'), 'Preview contains ORCID iD');
     assert(preview.includes('Total Works: 2'), 'Preview contains total work count');
     assert(preview.includes('Graph Theory & Citation Networks'), 'Preview includes work title 1');
+    assert(preview.includes('Josiah Carberry'), 'Preview includes author 1');
     assert(preview.includes('10.1000/182'), 'Preview includes DOI');
     assert(preview.includes('2023'), 'Preview includes publication year');
+    assert(preview.includes('[Already in Zotero]'), 'Preview includes [Already in Zotero] label');
+    assert(preview.includes('[New]'), 'Preview includes [New] label');
     assert(preview.includes('READ-ONLY PREVIEW'), 'Preview contains read-only disclaimer');
     assert(preview.includes('No items were imported'), 'Preview confirms zero library modification');
 
@@ -354,9 +357,238 @@ try {
     assert(alertCalls.length === 1, 'No additional alert called when user cancelled prompt');
 
     // ==========================================
-    // Test 9: Strict Read-Only Verification
+    // Test 9: Step 3 Duplicate Detection & Library Integration Tests
     // ==========================================
-    console.log('\n-- Step 2: Strict Read-Only Verification --');
+    console.log('\n-- Step 3: Duplicate Detection & Normalization Tests --');
+
+    // 9a: DOI Normalization
+    assert(typeof OA.normalizeDoi === 'function', 'normalizeDoi function exists');
+    assert(OA.normalizeDoi('10.1000/182') === '10.1000/182', 'Standard DOI normalized');
+    assert(OA.normalizeDoi('https://doi.org/10.1000/182') === '10.1000/182', 'https://doi.org/ prefix stripped');
+    assert(OA.normalizeDoi('http://dx.doi.org/10.1000/182/') === '10.1000/182', 'http://dx.doi.org/ prefix and trailing slash stripped');
+    assert(OA.normalizeDoi('doi: 10.1000/182.') === '10.1000/182', 'doi: prefix and trailing dot stripped');
+    assert(OA.normalizeDoi('10.1000/AbC-XyZ') === '10.1000/abc-xyz', 'DOI normalized to lowercase');
+    assert(OA.normalizeDoi(null) === null, 'null DOI returns null');
+    assert(OA.normalizeDoi('') === null, 'Empty DOI returns null');
+
+    // 9b: Title Normalization & Matching
+    assert(typeof OA.normalizeTitle === 'function', 'normalizeTitle function exists');
+    assert(OA.normalizeTitle('Quantum Computing: An Overview.') === 'quantum computing an overview', 'Punctuation stripped from title');
+    assert(OA.normalizeTitle('  Machine   Learning   ') === 'machine learning', 'Whitespace collapsed and trimmed');
+    assert(OA.titlesMatch('Quantum Computing: An Overview', 'quantum computing - an overview.') === true, 'Punctuation variations match');
+    assert(OA.titlesMatch('Deep Learning for NLP', 'deep learning for nlp') === true, 'Case insensitive title match');
+    assert(OA.titlesMatch('Different Paper Title A', 'Unrelated Topic B') === false, 'Dissimilar titles do not match');
+
+    // 9c: Year Extraction
+    assert(typeof OA.extractYear === 'function', 'extractYear function exists');
+    assert(OA.extractYear('2023-05-12') === '2023', 'Year extracted from ISO date string');
+    assert(OA.extractYear(2018) === '2018', 'Year extracted from number');
+    assert(OA.extractYear('Published in 1999') === '1999', 'Year extracted from prose');
+    assert(OA.extractYear('Unknown Date') === null, 'Non-date returns null');
+
+    // 9d: Author Tokens & Matching
+    assert(typeof OA.extractAuthorTokens === 'function', 'extractAuthorTokens function exists');
+    const authorTokens = OA.extractAuthorTokens('Josiah Carberry, Ada Lovelace');
+    assert(authorTokens.includes('carberry') && authorTokens.includes('lovelace'), 'Author tokens extracted correctly');
+    assert(OA.authorsMatch('Josiah Carberry', 'Carberry, J.') === 'carberry', 'Matching author token detected');
+    assert(OA.authorsMatch('John Smith', 'Ada Lovelace') === false, 'Conflicting authors detected as false');
+    assert(OA.authorsMatch(null, 'Ada Lovelace') === null, 'Missing author metadata returns null');
+
+    // 9e: Duplicate Detection - Strongest Match: Normalized DOI
+    console.log('\n-- Step 3: Local Library Matching Tests --');
+    const localLibraryMock = [
+      {
+        id: 101,
+        title: 'Completely Different Title in Local Library',
+        doi: '10.1000/182',
+        year: '2020',
+        author: 'Smith'
+      },
+      {
+        id: 102,
+        title: 'A Methodology for the Emulation of Architecture',
+        doi: '10.5555/12345680',
+        year: '2012',
+        author: 'Josiah Carberry'
+      },
+      {
+        id: 103,
+        title: 'Quantum computing a survey part 1',
+        doi: null,
+        year: '2021',
+        author: 'Ada Lovelace'
+      },
+      {
+        id: 104,
+        title: 'Title Matching Work With Conflicting Year',
+        doi: null,
+        year: '2015',
+        author: 'Josiah Carberry'
+      },
+      {
+        id: 105,
+        title: 'Title Matching Work With Conflicting Author',
+        doi: null,
+        year: '2023',
+        author: 'Bob Taylor'
+      },
+      {
+        id: 106,
+        title: 'Title-Only Resemblance With Missing Year And Author',
+        doi: null,
+        year: null,
+        author: null
+      }
+    ];
+
+    // Case 1: DOI Match (URL prefix in ORCID, raw DOI in Zotero) -> "Already in Zotero"
+    const orcidWorksCase1 = [
+      {
+        title: 'Emulation of Architecture: Research Paper',
+        doi: 'https://doi.org/10.1000/182/',
+        year: '2023',
+        author: 'Josiah Carberry'
+      }
+    ];
+    const res1 = OA.detectDuplicates(orcidWorksCase1, localLibraryMock);
+    assert(res1[0].duplicateStatus === 'Already in Zotero', 'Exact normalized DOI match labeled "Already in Zotero"');
+    assert(res1[0].matchType === 'DOI', 'Match type is DOI');
+    assert(res1[0].matchedItem.id === 101, 'Matched correct local library item ID');
+
+    // Case 2: Missing DOI on ORCID work, Title + Year + Author Match -> "Possible Duplicate"
+    const orcidWorksCase2 = [
+      {
+        title: 'A methodology for the emulation of architecture.',
+        doi: null,
+        year: '2012',
+        author: 'Carberry, Josiah'
+      }
+    ];
+    const res2 = OA.detectDuplicates(orcidWorksCase2, localLibraryMock);
+    assert(res2[0].duplicateStatus === 'Possible Duplicate', 'Missing DOI with matching title, year, and author labeled "Possible Duplicate"');
+    assert(res2[0].matchType === 'TITLE_YEAR', 'Match type is TITLE_YEAR');
+    assert(res2[0].matchedItem.id === 102, 'Matched correct item 102');
+
+    // Case 3: Title Variations (colon vs dash, lowercase) with matching year & author -> "Possible Duplicate"
+    const orcidWorksCase3 = [
+      {
+        title: 'Quantum Computing: A Survey - Part 1',
+        doi: null,
+        year: '2021',
+        author: 'Lovelace'
+      }
+    ];
+    const res3 = OA.detectDuplicates(orcidWorksCase3, localLibraryMock);
+    assert(res3[0].duplicateStatus === 'Possible Duplicate', 'Title variation with matching year and author labeled "Possible Duplicate"');
+    assert(res3[0].matchedItem.id === 103, 'Matched correct item 103');
+
+    // Case 4: Negative Match: Same title, but DIFFERENT years (e.g. 2022 vs 2015) -> "New"
+    const orcidWorksCase4 = [
+      {
+        title: 'Title Matching Work With Conflicting Year',
+        doi: null,
+        year: '2022', // Local is 2015
+        author: 'Josiah Carberry'
+      }
+    ];
+    const res4 = OA.detectDuplicates(orcidWorksCase4, localLibraryMock);
+    assert(res4[0].duplicateStatus === 'New', 'Conflicting year is NOT treated as duplicate; labeled "New"');
+
+    // Case 5: Negative Match: Same title and year, but DIFFERENT authors -> "New"
+    const orcidWorksCase5 = [
+      {
+        title: 'Title Matching Work With Conflicting Author',
+        doi: null,
+        year: '2023',
+        author: 'Josiah Carberry' // Local is Bob Taylor
+      }
+    ];
+    const res5 = OA.detectDuplicates(orcidWorksCase5, localLibraryMock);
+    assert(res5[0].duplicateStatus === 'New', 'Conflicting author is NOT treated as duplicate; labeled "New"');
+
+    // Case 6: Negative Match: Title matches, but BOTH year and author are missing -> "New"
+    // (Requirement 4: "Do not treat title-only similarity as a confirmed duplicate.")
+    const orcidWorksCase6 = [
+      {
+        title: 'Title-Only Resemblance With Missing Year And Author',
+        doi: null,
+        year: null,
+        author: null
+      }
+    ];
+    const res6 = OA.detectDuplicates(orcidWorksCase6, localLibraryMock);
+    assert(res6[0].duplicateStatus === 'New', 'Title-only similarity without year or author confirmation is labeled "New"');
+
+    // Case 7: Completely New Work (no match in library) -> "New"
+    const orcidWorksCase7 = [
+      {
+        title: 'Completely Unique Brand New Paper',
+        doi: '10.9999/brand-new',
+        year: '2026',
+        author: 'Josiah Carberry'
+      }
+    ];
+    const res7 = OA.detectDuplicates(orcidWorksCase7, localLibraryMock);
+    assert(res7[0].duplicateStatus === 'New', 'Unmatched paper labeled "New"');
+
+    // Case 8: Empty Local Library -> All works "New"
+    const res8 = OA.detectDuplicates([
+      { title: 'Work 1', doi: '10.1000/1', year: '2021', author: 'Author A' },
+      { title: 'Work 2', doi: null, year: '2022', author: 'Author B' }
+    ], []);
+    assert(res8[0].duplicateStatus === 'New' && res8[1].duplicateStatus === 'New', 'Empty local library results in all works labeled "New"');
+
+    // 9f: Duplicate Statistics Helper
+    const testStats = OA.computeDuplicateStats([
+      { duplicateStatus: 'Already in Zotero' },
+      { duplicateStatus: 'Already in Zotero' },
+      { duplicateStatus: 'Possible Duplicate' },
+      { duplicateStatus: 'New' }
+    ]);
+    assert(testStats.alreadyCount === 2, 'Duplicate stats computes alreadyCount correctly');
+    assert(testStats.possibleCount === 1, 'Duplicate stats computes possibleCount correctly');
+    assert(testStats.newCount === 1, 'Duplicate stats computes newCount correctly');
+
+    // 9g: Integrated Prompt Flow with Duplicate Detection
+    console.log('\n-- Step 3: Interactive Prompt Flow with Duplicate Detection --');
+    OA.mockLibraryItems = localLibraryMock;
+    let step3AlertCalls = [];
+    sandbox.Services.prompt.prompt = (win, title, msg, inputVal) => {
+      inputVal.value = '0000-0002-1825-0097';
+      return true;
+    };
+    sandbox.Services.prompt.alert = (win, title, msg) => {
+      step3AlertCalls.push({ title, msg });
+    };
+    sandbox.Services.prompt.confirm = (win, title, msg) => false;
+
+    OA.fetchImpl = async () => ({
+      ok: true,
+      json: async () => ({
+        success: true,
+        orcid: '0000-0002-1825-0097',
+        totalWorks: 3,
+        works: [
+          { title: 'Paper with Matching DOI', doi: '10.1000/182', year: '2023', author: 'Josiah Carberry', type: 'journal-article' },
+          { title: 'Quantum Computing: A Survey - Part 1', doi: null, year: '2021', author: 'Lovelace', type: 'conference-paper' },
+          { title: 'Completely Unique Brand New Paper', doi: '10.9999/brand-new', year: '2026', author: 'Josiah Carberry', type: 'journal-article' }
+        ]
+      })
+    });
+
+    await OA.promptFetchPublicWorks(mockWindow);
+    assert(step3AlertCalls.length === 1, 'Prompt displayed preview alert dialog to user');
+    const alertMsg = step3AlertCalls[0].msg;
+    assert(alertMsg.includes('[Already in Zotero]'), 'Preview displays [Already in Zotero] tag');
+    assert(alertMsg.includes('[Possible Duplicate]'), 'Preview displays [Possible Duplicate] tag');
+    assert(alertMsg.includes('[New]'), 'Preview displays [New] tag');
+    assert(alertMsg.includes('Detection:   1 Already in Zotero | 1 Possible Duplicate | 1 New'), 'Preview summary header reflects duplicate counts');
+    assert(alertMsg.includes('READ-ONLY PREVIEW'), 'Preview includes read-only disclaimer');
+
+    // ==========================================
+    // Test 10: Strict Read-Only Verification
+    // ==========================================
+    console.log('\n-- Step 3: Strict Read-Only Verification --');
     assert(sandbox.Zotero.Items === undefined, 'No Zotero.Items API write operations exist');
     assert(typeof OA.showRunningDialog === 'function', 'showRunningDialog preserved from Step 1');
 
@@ -368,9 +600,9 @@ try {
     assert(sandbox.ORCIDAssistant === undefined, 'ORCIDAssistant singleton is unset on shutdown');
 
     // ==========================================
-    // Test 10: Verify XPI Archive Content & Isolation
+    // Test 11: Verify XPI Archive Content & Isolation
     // ==========================================
-    console.log('\n-- Step 2: XPI Archive Security & Content Isolation --');
+    console.log('\n-- Step 3: XPI Archive Security & Content Isolation --');
     if (fs.existsSync(XPI_PATH)) {
       const zip = new AdmZip(XPI_PATH);
       const entries = zip.getEntries().map(e => e.entryName);

@@ -255,11 +255,31 @@ class OrcidClient {
       // Extract journal title
       const journalTitle = summary['journal-title']?.value || null;
 
+      // Extract authors/contributors when available
+      let authors = [];
+      if (summary.contributors?.contributor) {
+        const contribs = Array.isArray(summary.contributors.contributor)
+          ? summary.contributors.contributor
+          : [summary.contributors.contributor];
+        for (const c of contribs) {
+          const name = c['credit-name']?.value;
+          if (name && !authors.includes(name)) {
+            authors.push(name);
+          }
+        }
+      }
+      if (authors.length === 0 && summary.source?.['assertion-origin-name']?.value) {
+        authors.push(summary.source['assertion-origin-name'].value);
+      }
+      const author = authors.length > 0 ? authors.join(', ') : null;
+
       return {
         title,
         doi,
         year,
         type,
+        authors,
+        author,
         putCode,
         journalTitle
       };

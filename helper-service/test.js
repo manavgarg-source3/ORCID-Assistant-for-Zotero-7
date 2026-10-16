@@ -103,6 +103,15 @@ async function runTests() {
                   'type': 'journal-article',
                   'publication-date': { 'year': { 'value': '2023' } },
                   'journal-title': { 'value': 'Journal of Physics' },
+                  'source': {
+                    'assertion-origin-name': { 'value': 'Josiah Carberry' }
+                  },
+                  'contributors': {
+                    'contributor': [
+                      { 'credit-name': { 'value': 'Josiah Carberry' } },
+                      { 'credit-name': { 'value': 'Ada Lovelace' } }
+                    ]
+                  },
                   'external-ids': {
                     'external-id': [
                       {
@@ -122,6 +131,9 @@ async function runTests() {
                   'type': 'conference-paper',
                   'publication-date': { 'year': { 'value': '2024' } },
                   'journal-title': null,
+                  'source': {
+                    'assertion-origin-name': { 'value': 'Josiah Carberry' }
+                  },
                   'external-ids': {
                     'external-id': []
                   }
@@ -159,9 +171,12 @@ async function runTests() {
   assert(worksResult.works[0].title === 'Sample Research Paper on Quantum Computing', 'Work 1 title parsed');
   assert(worksResult.works[0].doi === '10.1000/182', 'Work 1 DOI parsed');
   assert(worksResult.works[0].year === '2023', 'Work 1 year parsed');
+  assert(worksResult.works[0].author.includes('Josiah Carberry'), 'Work 1 author parsed');
+  assert(worksResult.works[0].authors.length === 2, 'Work 1 multi-author list parsed');
   assert(worksResult.works[1].title === 'Conference Keynote: Future of Metadata', 'Work 2 title parsed');
   assert(worksResult.works[1].doi === null, 'Work 2 missing DOI handled gracefully as null');
   assert(worksResult.works[1].year === '2024', 'Work 2 year parsed');
+  assert(worksResult.works[1].author === 'Josiah Carberry', 'Work 2 fallback to assertion-origin-name');
 
   // 4. Mocked Error Cases (404, 403, Empty Works)
   console.log('\n-- 4. Error Cases Handling --');
