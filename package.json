@@ -5,7 +5,10 @@
   "main": "src/bootstrap.js",
   "scripts": {
     "build": "node scripts/build.js",
-    "test": "node scripts/test.js",
+    "helper": "node helper-service/server.js",
+    "test": "node scripts/test.js && node helper-service/test.js",
+    "test:plugin": "node scripts/test.js",
+    "test:helper": "node helper-service/test.js",
     "package": "npm run build && npm test"
   },
   "keywords": [

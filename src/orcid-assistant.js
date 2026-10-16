@@ -11,6 +11,8 @@ var ORCIDAssistant = {
   addedElementIDs: [],
   menuManagerToolsID: null,
   menuManagerContextID: null,
+  helperUrl: "http://127.0.0.1:23125",
+  fetchImpl: null,
 
   /**
    * Initialize plugin state.
@@ -262,11 +264,291 @@ var ORCIDAssistant = {
   },
 
   /**
+   * Resolve helper service base URL from preferences or default.
+   */
+  getHelperUrl() {
+    if (typeof Zotero !== "undefined" && Zotero.Prefs && typeof Zotero.Prefs.get === "function") {
+      try {
+        let prefUrl = Zotero.Prefs.get("extensions.orcid-assistant.helperUrl", true);
+        if (prefUrl) return prefUrl;
+      } catch (e) {}
+    }
+    return this.helperUrl || "http://127.0.0.1:23125";
+  },
+
+  /**
+   * Validate and normalize an ORCID iD string.
+   * Strips URI prefixes and verifies ISO 7064 MOD 11-2 check digit.
+   */
+  validateAndNormalizeOrcid(rawOrcid) {
+    if (typeof rawOrcid !== "string") {
+      return { valid: false, error: "ORCID iD must be a string." };
+    }
+    let trimmed = rawOrcid.trim();
+    if (!trimmed) {
+      return { valid: false, error: "ORCID iD cannot be empty." };
+    }
+
+    // Strip URL prefixes if user pasted full URL
+    const cleaned = trimmed.replace(/^https?:\/\/(?:sandbox\.)?orcid\.org\//i, "");
+
+    // Must match 16 characters in groups of 4 with hyphens
+    const match = cleaned.match(/^([0-9]{4})-([0-9]{4})-([0-9]{4})-([0-9]{3}[0-9Xx])$/);
+    if (!match) {
+      return {
+        valid: false,
+        error: `Invalid ORCID iD format: "${cleaned}". Expected 16 digits formatted as 0000-0000-0000-0000 (e.g., 0000-0002-1825-0097).`
+      };
+    }
+
+    // ISO 7064 MOD 11-2 check digit validation
+    const digits = cleaned.replace(/-/g, "");
+    let total = 0;
+    for (let i = 0; i < 15; i++) {
+      const digit = parseInt(digits[i], 10);
+      total = (total + digit) * 2;
+    }
+    const remainder = total % 11;
+    const result = (12 - remainder) % 11;
+    const expectedCheckChar = result === 10 ? "X" : String(result);
+    const actualCheckChar = digits[15].toUpperCase();
+
+    if (expectedCheckChar !== actualCheckChar) {
+      return {
+        valid: false,
+        error: `Invalid ORCID check digit for "${cleaned}". Expected '${expectedCheckChar}', got '${actualCheckChar}'. Check for mistyped digits.`
+      };
+    }
+
+    return {
+      valid: true,
+      orcid: cleaned.toUpperCase()
+    };
+  },
+
+  /**
+   * Fetch public works from the local Node.js helper service.
+   * Helper service runs on 127.0.0.1 and securely proxies requests to the ORCID API.
+   */
+  async fetchWorksFromHelper(orcid) {
+    const helperUrl = this.getHelperUrl();
+    const endpoint = `${helperUrl}/api/works?orcid=${encodeURIComponent(orcid)}`;
+    this.log(`Fetching public works for ${orcid} from helper at ${endpoint}`);
+
+    const fetchFn = this.fetchImpl || (typeof fetch !== "undefined" ? fetch : null);
+    if (!fetchFn) {
+      return {
+        success: false,
+        code: "NO_FETCH",
+        error: "Global fetch API is not available in current environment."
+      };
+    }
+
+    let controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    let timeoutId = controller ? setTimeout(() => controller.abort(), 10000) : null;
+
+    try {
+      const response = await fetchFn(endpoint, {
+        method: "GET",
+        headers: {
+          "Accept": "application/json"
+        },
+        signal: controller ? controller.signal : undefined
+      });
+
+      const data = await response.json();
+      return data;
+    } catch (err) {
+      if (err.name === "AbortError") {
+        return {
+          success: false,
+          code: "TIMEOUT",
+          error: "Connection to local helper service timed out after 10 seconds."
+        };
+      }
+      return {
+        success: false,
+        code: "NETWORK_ERROR",
+        error: `Could not connect to helper service at ${helperUrl}. Please verify the helper service is running on 127.0.0.1 (run: npm run helper).`
+      };
+    } finally {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    }
+  },
+
+  /**
+   * Format fetched works into a clean, read-only preview text.
+   */
+  formatWorksPreview(data) {
+    const orcid = data.orcid || "N/A";
+    const total = data.totalWorks || 0;
+    const works = Array.isArray(data.works) ? data.works : [];
+
+    let lines = [];
+    lines.push("==================================================");
+    lines.push("           ORCID PUBLIC WORKS PREVIEW            ");
+    lines.push("==================================================");
+    lines.push(`ORCID iD:    ${orcid}`);
+    lines.push(`Total Works: ${total}`);
+    lines.push("--------------------------------------------------");
+
+    if (works.length === 0) {
+      lines.push("No public works found for this ORCID profile.");
+    } else {
+      const previewLimit = Math.min(works.length, 10);
+      for (let i = 0; i < previewLimit; i++) {
+        const w = works[i];
+        lines.push(`[${i + 1}] Title: ${w.title || "(Untitled)"}`);
+        lines.push(`    Year:  ${w.year || "Not specified"}`);
+        lines.push(`    DOI:   ${w.doi || "None"}`);
+        lines.push(`    Type:  ${w.type || "work"}`);
+        if (w.journalTitle) {
+          lines.push(`    Venue: ${w.journalTitle}`);
+        }
+        lines.push("");
+      }
+      if (works.length > previewLimit) {
+        lines.push(`... and ${works.length - previewLimit} more public works (total: ${total}).`);
+      }
+    }
+
+    lines.push("==================================================");
+    lines.push("READ-ONLY PREVIEW: No items were imported, modified,");
+    lines.push("or deleted in your Zotero library.");
+    lines.push("==================================================");
+
+    return lines.join("\n");
+  },
+
+  /**
+   * Interactive UI flow: prompt for ORCID iD, query helper, and display preview.
+   */
+  async promptFetchPublicWorks(window, initialValue = "") {
+    let promptService = (typeof Services !== "undefined" && Services.prompt) ? Services.prompt : null;
+
+    if (!promptService || typeof promptService.prompt !== "function") {
+      this.showRunningDialog(window);
+      return;
+    }
+
+    let currentInput = initialValue || "";
+
+    while (true) {
+      let inputVal = { value: currentInput };
+      let checkVal = { value: false };
+      let confirmed = promptService.prompt(
+        window || null,
+        "ORCID Assistant - Fetch Public Works",
+        "ORCID Assistant is running.\n\nEnter an ORCID iD to preview public works:\n(e.g., 0000-0002-1825-0097 or https://orcid.org/0000-0002-1825-0097)",
+        inputVal,
+        null,
+        checkVal
+      );
+
+      if (!confirmed) {
+        this.log("Fetch Public Works prompt cancelled by user.");
+        return;
+      }
+
+      currentInput = (inputVal.value || "").trim();
+      if (!currentInput) {
+        let retryEmpty = promptService.confirm
+          ? promptService.confirm(
+              window || null,
+              "ORCID Assistant",
+              "No ORCID iD was entered.\n\nWould you like to try again?"
+            )
+          : false;
+        if (retryEmpty) continue;
+        return;
+      }
+
+      // Validate format & check digit
+      let validation = this.validateAndNormalizeOrcid(currentInput);
+      if (!validation.valid) {
+        let retryInvalid = promptService.confirm
+          ? promptService.confirm(
+              window || null,
+              "ORCID Assistant - Invalid Identifier",
+              `${validation.error}\n\nWould you like to correct the ORCID iD and try again?`
+            )
+          : false;
+        if (retryInvalid) continue;
+        return;
+      }
+
+      const normalizedOrcid = validation.orcid;
+      this.log(`Initiating public works fetch for ${normalizedOrcid}...`);
+
+      let result = await this.fetchWorksFromHelper(normalizedOrcid);
+
+      if (!result.success) {
+        let errorMsg = result.error || "An unknown error occurred while contacting the helper service.";
+        if (result.code === "MISSING_CREDENTIALS") {
+          errorMsg = "ORCID API credentials are not configured in the helper service.\n\n" +
+            "To configure:\n" +
+            "1. Copy .env.example to .env in the project directory.\n" +
+            "2. Add your ORCID_CLIENT_ID and ORCID_CLIENT_SECRET.\n" +
+            "3. Start or restart the helper service: npm run helper";
+        } else if (result.code === "NETWORK_ERROR") {
+          errorMsg = `Could not connect to helper service at ${this.getHelperUrl()}.\n\n` +
+            "Please make sure the local helper service is running:\n" +
+            "  npm run helper";
+        } else if (result.code === "RECORD_NOT_FOUND") {
+          errorMsg = `ORCID record '${normalizedOrcid}' was not found in the public ORCID registry (404).\n\nPlease verify the identifier.`;
+        }
+
+        let retryAfterError = promptService.confirm
+          ? promptService.confirm(
+              window || null,
+              "ORCID Assistant - Fetch Error",
+              `${errorMsg}\n\nWould you like to try another ORCID iD?`
+            )
+          : false;
+        if (retryAfterError) continue;
+        return;
+      }
+
+      // Success: Display read-only preview
+      const previewText = this.formatWorksPreview(result);
+      if (typeof promptService.alert === "function") {
+        promptService.alert(
+          window || null,
+          `ORCID Public Works Preview (${result.totalWorks} works found)`,
+          previewText
+        );
+      }
+
+      // Ask if user wants to fetch for another ORCID iD
+      let fetchAnother = promptService.confirm
+        ? promptService.confirm(
+            window || null,
+            "ORCID Assistant",
+            "Would you like to fetch public works for another ORCID iD?"
+          )
+        : false;
+
+      if (fetchAnother) {
+        currentInput = "";
+        continue;
+      }
+
+      return;
+    }
+  },
+
+  /**
    * Callback when menu item is clicked.
    */
   onMenuItemCommand(window) {
     this.log("Menu entry clicked by user.");
-    this.showRunningDialog(window);
+    if (typeof Services !== "undefined" && Services.prompt && typeof Services.prompt.prompt === "function") {
+      this.promptFetchPublicWorks(window).catch(err => this.logError(err));
+    } else {
+      this.showRunningDialog(window);
+    }
   },
 
   /**
