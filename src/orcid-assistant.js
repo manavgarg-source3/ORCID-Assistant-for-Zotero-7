@@ -736,6 +736,12 @@ var ORCIDAssistant = {
         lines.push(`    Year:    ${w.year || "Not specified"}`);
         lines.push(`    DOI:     ${w.doi || "None"}`);
         lines.push(`    Type:    ${w.type || "work"}`);
+        if (w.journalTitle) {
+          lines.push(`    Journal: ${w.journalTitle}`);
+        }
+        if (w.isEnriched || (w.sources && w.sources.includes("crossref"))) {
+          lines.push(`    Source:  ORCID + Crossref`);
+        }
         if (w.matchReason && statusLabel !== "New") {
           lines.push(`    Match:   ${w.matchReason}`);
         }
@@ -941,6 +947,56 @@ var ORCIDAssistant = {
   },
 
   /**
+   * Normalize an author entry from string or structured object into a Zotero creator object.
+   * Preserves organizational authors with fieldMode=1.
+   */
+  normalizeCreator(authorInput) {
+    if (!authorInput) return { lastName: "Unknown", creatorType: "author" };
+
+    // 1. Structured object (e.g. from Crossref or ORCID detail)
+    if (typeof authorInput === "object") {
+      const creatorType = authorInput.creatorType || "author";
+
+      // Institutional or collaboration author
+      if (authorInput.fieldMode === 1 || authorInput.name) {
+        const orgName = (authorInput.name || authorInput.lastName || authorInput.fullName || "").trim();
+        return {
+          lastName: orgName || "Unknown Organization",
+          fieldMode: 1,
+          creatorType
+        };
+      }
+
+      const lastName = (authorInput.lastName || authorInput.family || "").trim();
+      const firstName = (authorInput.firstName || authorInput.given || "").trim();
+
+      if (!firstName && !lastName) {
+        if (authorInput.fullName) {
+          return this.parseAuthorName(authorInput.fullName);
+        }
+        return { lastName: "Unknown", creatorType };
+      }
+
+      if (!firstName) {
+        return this.parseAuthorName(lastName);
+      }
+
+      return {
+        firstName,
+        lastName: lastName || "Unknown",
+        creatorType
+      };
+    }
+
+    // 2. String representation
+    if (typeof authorInput === "string") {
+      return this.parseAuthorName(authorInput);
+    }
+
+    return { lastName: "Unknown", creatorType: "author" };
+  },
+
+  /**
    * Parse a raw author string into Zotero creator object.
    */
   parseAuthorName(rawName) {
@@ -976,7 +1032,77 @@ var ORCIDAssistant = {
   },
 
   /**
-   * Create and populate a Zotero.Item instance from ORCID work metadata.
+   * Safely set a Zotero item field if supported and non-empty.
+   */
+  setItemFieldSafe(item, field, value) {
+    if (!item || !field || value === undefined || value === null) return false;
+    const strVal = String(value).trim();
+    if (!strVal) return false;
+
+    try {
+      if (typeof item.isValidField === "function") {
+        if (!item.isValidField(field)) return false;
+      }
+      item.setField(field, strVal);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+
+  /**
+   * Assess metadata quality, reporting available, enriched, and missing fields.
+   */
+  assessMetadataQuality(work) {
+    const availableFields = [];
+    const missingFields = [];
+    const enrichedFields = Array.isArray(work.enrichedFields) ? work.enrichedFields : [];
+
+    const checkField = (fieldKey, label) => {
+      const val = work[fieldKey];
+      const hasValue = (val !== undefined && val !== null && (
+        typeof val === "string" ? val.trim().length > 0 :
+        (Array.isArray(val) ? val.length > 0 : true)
+      ));
+      if (hasValue) {
+        availableFields.push(label);
+      } else {
+        missingFields.push(label);
+      }
+    };
+
+    checkField("title", "Title");
+    checkField("authors", "Authors");
+    checkField("date", "Date");
+    checkField("doi", "DOI");
+    checkField("journalTitle", "Journal/Source");
+    checkField("volume", "Volume");
+    checkField("issue", "Issue");
+    checkField("pages", "Pages");
+    checkField("issn", "ISSN");
+    checkField("url", "URL");
+    checkField("abstractNote", "Abstract");
+
+    const rawSources = Array.isArray(work.sources) && work.sources.length > 0
+      ? work.sources
+      : (work.isEnriched ? ["orcid", "crossref"] : ["orcid"]);
+
+    const isCrossrefEnriched = rawSources.includes("crossref");
+    const sourceSummary = rawSources.length > 1 ? "ORCID + Crossref" : (rawSources[0] === "crossref" ? "Crossref" : "ORCID");
+
+    return {
+      availableFields,
+      enrichedFields,
+      missingFields,
+      sources: rawSources,
+      sourceSummary,
+      isEnriched: isCrossrefEnriched,
+      completenessScore: Math.round((availableFields.length / (availableFields.length + missingFields.length)) * 100)
+    };
+  },
+
+  /**
+   * Create and populate a Zotero.Item instance from enriched work metadata.
    */
   async createZoteroItem(work, targetLibraryID) {
     const zoteroType = this.mapOrcidTypeToZotero(work.type);
@@ -1013,70 +1139,174 @@ var ORCIDAssistant = {
       item.libraryID = libID;
     }
 
-    // Title (required)
+    // 1. Title (required)
     const title = (work.title || "").trim() || "(Untitled ORCID Publication)";
-    item.setField("title", title);
+    this.setItemFieldSafe(item, "title", title);
 
-    // DOI (if available)
+    // 2. DOI (normalized)
     const normDoi = this.normalizeDoi(work.doi);
     if (normDoi) {
-      try {
-        item.setField("DOI", normDoi);
-      } catch (e) {
-        try { item.setField("doi", normDoi); } catch (e2) {}
-      }
+      this.setItemFieldSafe(item, "DOI", normDoi);
     }
 
-    // Publication Year / Date (if available)
-    const year = this.extractYear(work.year);
-    if (year) {
-      try {
-        item.setField("date", year);
-      } catch (e) {}
+    // 3. Publication Date / Year
+    const effectiveDate = work.date || (work.year && work.year !== "Unknown" ? String(work.year) : null);
+    if (effectiveDate) {
+      this.setItemFieldSafe(item, "date", effectiveDate);
     }
 
-    // Publication / Journal Title (if available)
-    if (work.journalTitle) {
-      try {
-        item.setField("publicationTitle", work.journalTitle);
-      } catch (e) {
-        try { item.setField("publisher", work.journalTitle); } catch (e2) {}
-      }
-    }
-
-    // URL (if available)
+    // 4. URL
     if (work.url) {
-      try {
-        item.setField("url", work.url);
-      } catch (e) {}
+      this.setItemFieldSafe(item, "url", work.url);
     }
 
-    // Extra provenance
-    const extraLines = [];
-    if (work.orcid) {
-      extraLines.push(`ORCID: ${work.orcid}`);
-    }
-    if (work.putCode) {
-      extraLines.push(`ORCID-Put-Code: ${work.putCode}`);
-    }
-    if (extraLines.length > 0) {
-      try {
-        const existingExtra = (typeof item.getField === "function") ? (item.getField("extra") || "") : "";
-        const combined = existingExtra ? `${existingExtra}\n${extraLines.join("\n")}` : extraLines.join("\n");
-        item.setField("extra", combined);
-      } catch (e) {}
+    // 5. Abstract
+    if (work.abstractNote) {
+      this.setItemFieldSafe(item, "abstractNote", work.abstractNote);
     }
 
-    // Creators / Authors
-    const authors = Array.isArray(work.authors) && work.authors.length > 0
+    // 6. Language
+    if (work.language) {
+      this.setItemFieldSafe(item, "language", work.language);
+    }
+
+    // 7. Type-specific Bibliographic Field Mapping
+    const containerTitle = work.journalTitle || work.containerTitle || null;
+
+    switch (zoteroType) {
+      case "journalArticle":
+      case "magazineArticle":
+      case "newspaperArticle":
+        if (containerTitle) {
+          this.setItemFieldSafe(item, "publicationTitle", containerTitle);
+        }
+        if (work.journalAbbreviation || work.shortContainerTitle) {
+          this.setItemFieldSafe(item, "journalAbbreviation", work.journalAbbreviation || work.shortContainerTitle);
+        }
+        if (work.volume) {
+          this.setItemFieldSafe(item, "volume", work.volume);
+        }
+        if (work.issue) {
+          this.setItemFieldSafe(item, "issue", work.issue);
+        }
+        if (work.pages || work.page) {
+          this.setItemFieldSafe(item, "pages", work.pages || work.page);
+        }
+        if (work.issn) {
+          this.setItemFieldSafe(item, "ISSN", work.issn);
+        }
+        break;
+
+      case "book":
+        if (work.publisher) {
+          this.setItemFieldSafe(item, "publisher", work.publisher);
+        }
+        if (work.isbn) {
+          this.setItemFieldSafe(item, "ISBN", work.isbn);
+        }
+        if (work.volume) {
+          this.setItemFieldSafe(item, "volume", work.volume);
+        }
+        if (work.pages) {
+          this.setItemFieldSafe(item, "numPages", work.pages);
+        }
+        break;
+
+      case "bookSection":
+        if (containerTitle) {
+          this.setItemFieldSafe(item, "bookTitle", containerTitle);
+        }
+        if (work.publisher) {
+          this.setItemFieldSafe(item, "publisher", work.publisher);
+        }
+        if (work.volume) {
+          this.setItemFieldSafe(item, "volume", work.volume);
+        }
+        if (work.pages || work.page) {
+          this.setItemFieldSafe(item, "pages", work.pages || work.page);
+        }
+        if (work.isbn) {
+          this.setItemFieldSafe(item, "ISBN", work.isbn);
+        }
+        break;
+
+      case "conferencePaper":
+        if (containerTitle) {
+          this.setItemFieldSafe(item, "proceedingsTitle", containerTitle);
+          this.setItemFieldSafe(item, "conferenceName", containerTitle);
+        }
+        if (work.publisher) {
+          this.setItemFieldSafe(item, "publisher", work.publisher);
+        }
+        if (work.volume) {
+          this.setItemFieldSafe(item, "volume", work.volume);
+        }
+        if (work.pages || work.page) {
+          this.setItemFieldSafe(item, "pages", work.pages || work.page);
+        }
+        if (work.isbn) {
+          this.setItemFieldSafe(item, "ISBN", work.isbn);
+        }
+        break;
+
+      case "report":
+        if (work.publisher || containerTitle) {
+          this.setItemFieldSafe(item, "institution", work.publisher || containerTitle);
+        }
+        if (work.issue || work.volume) {
+          this.setItemFieldSafe(item, "reportNumber", work.issue || work.volume);
+        }
+        if (work.pages || work.page) {
+          this.setItemFieldSafe(item, "pages", work.pages || work.page);
+        }
+        break;
+
+      case "thesis":
+        if (work.publisher || containerTitle) {
+          this.setItemFieldSafe(item, "university", work.publisher || containerTitle);
+        }
+        if (work.type) {
+          this.setItemFieldSafe(item, "thesisType", work.type);
+        }
+        break;
+
+      case "preprint":
+        if (containerTitle || work.publisher) {
+          this.setItemFieldSafe(item, "repository", containerTitle || work.publisher);
+        }
+        break;
+
+      case "dataset":
+        if (containerTitle || work.publisher) {
+          this.setItemFieldSafe(item, "repository", containerTitle || work.publisher);
+        }
+        break;
+
+      case "patent":
+        if (work.issue || work.volume) {
+          this.setItemFieldSafe(item, "patentNumber", work.issue || work.volume);
+        }
+        break;
+
+      default:
+        if (containerTitle) {
+          this.setItemFieldSafe(item, "publicationTitle", containerTitle);
+        }
+        break;
+    }
+
+    // 8. Creators / Authors (supports both structured objects and strings)
+    const rawAuthors = Array.isArray(work.authors) && work.authors.length > 0
       ? work.authors
-      : (work.author ? [work.author] : []);
+      : (Array.isArray(work.contributors) && work.contributors.length > 0
+        ? work.contributors
+        : (work.author ? [work.author] : []));
 
-    if (authors.length > 0) {
+    if (rawAuthors.length > 0) {
       const creators = [];
-      for (const a of authors) {
-        if (!a || typeof a !== "string") continue;
-        creators.push(this.parseAuthorName(a));
+      for (const a of rawAuthors) {
+        if (!a) continue;
+        creators.push(this.normalizeCreator(a));
       }
       if (creators.length > 0) {
         try {
@@ -1086,6 +1316,25 @@ var ORCIDAssistant = {
         }
       }
     }
+
+    // 9. Extra Provenance (Strictly ORCID & Source provenance only)
+    const extraLines = [];
+    if (work.orcid) {
+      extraLines.push(`ORCID: ${work.orcid}`);
+    }
+    if (work.putCode) {
+      extraLines.push(`ORCID-Put-Code: ${work.putCode}`);
+    }
+    const sources = Array.isArray(work.sources) && work.sources.length > 0
+      ? work.sources
+      : (work.isEnriched ? ["orcid", "crossref"] : ["orcid"]);
+    extraLines.push(`Sources: ${sources.map(s => s.toUpperCase()).join(", ")}`);
+
+    try {
+      const existingExtra = (typeof item.getField === "function") ? (item.getField("extra") || "") : "";
+      const combined = existingExtra ? `${existingExtra}\n${extraLines.join("\n")}` : extraLines.join("\n");
+      item.setField("extra", combined);
+    } catch (e) {}
 
     return item;
   },
@@ -1333,20 +1582,52 @@ var ORCIDAssistant = {
         pillColor = "#92400e";
       }
 
-      const authorsText = w.author || (Array.isArray(w.authors) && w.authors.length > 0 ? w.authors.join(", ") : "Not specified");
+      const authorsText = Array.isArray(w.authors) && w.authors.length > 0
+        ? w.authors.map(a => typeof a === "object" ? (a.fullName || a.lastName) : a).join(", ")
+        : (w.author || "Not specified");
+
+      // Source and enrichment indicator
+      const quality = w.metadataQuality || this.assessMetadataQuality(w);
+      const isEnriched = quality.isEnriched;
+      const sourceBadgeBg = isEnriched ? "#e0e7ff" : "#f1f5f9";
+      const sourceBadgeColor = isEnriched ? "#3730a3" : "#475569";
+
+      // Bibliographic detail line
+      const bibDetails = [];
+      if (w.journalTitle) bibDetails.push(`<em>${w.journalTitle}</em>`);
+      if (w.volume) bibDetails.push(`Vol. ${w.volume}`);
+      if (w.issue) bibDetails.push(`No. ${w.issue}`);
+      if (w.pages || w.page) bibDetails.push(`pp. ${w.pages || w.page}`);
+      const bibLine = bibDetails.length > 0 ? `<div style="font-size:0.82rem;color:#334155;margin-bottom:4px;">${bibDetails.join(" • ")}</div>` : "";
+
+      // Quality pill row
+      let qualityInfo = "";
+      if (quality.enrichedFields && quality.enrichedFields.length > 0) {
+        qualityInfo += `<span style="font-size:0.72rem;background:#ecfdf5;color:#065f46;padding:1px 6px;border-radius:4px;font-weight:500;">✨ Enriched (${quality.enrichedFields.join(", ")})</span> `;
+      }
+      if (quality.missingFields && quality.missingFields.length > 0) {
+        const topMissing = quality.missingFields.slice(0, 3).join(", ");
+        qualityInfo += `<span style="font-size:0.72rem;background:#fef2f2;color:#991b1b;padding:1px 6px;border-radius:4px;font-weight:500;">Missing: ${topMissing}</span>`;
+      }
 
       contentCol.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;">
           <div style="font-weight:600;font-size:0.95rem;color:#0f172a;line-height:1.35;">${w.title || "(Untitled Publication)"}</div>
-          <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:9999px;background:${pillBg};color:${pillColor};white-space:nowrap;">${w.duplicateStatus}</span>
+          <div style="display:flex;gap:4px;align-items:center;flex-shrink:0;">
+            <span style="font-size:0.72rem;font-weight:600;padding:2px 7px;border-radius:9999px;background:${sourceBadgeBg};color:${sourceBadgeColor};white-space:nowrap;">${quality.sourceSummary}</span>
+            <span style="font-size:0.72rem;font-weight:600;padding:2px 7px;border-radius:9999px;background:${pillBg};color:${pillColor};white-space:nowrap;">${w.duplicateStatus}</span>
+          </div>
         </div>
-        <div style="font-size:0.85rem;color:#475569;margin-bottom:6px;">${authorsText}</div>
-        <div style="font-size:0.8rem;color:#64748b;display:flex;flex-wrap:wrap;gap:12px;">
+        <div style="font-size:0.85rem;color:#475569;margin-bottom:4px;">${authorsText}</div>
+        ${bibLine}
+        <div style="font-size:0.78rem;color:#64748b;display:flex;flex-wrap:wrap;gap:12px;margin-bottom:4px;">
           <span><strong>Year:</strong> ${w.year || "N/A"}</span>
           <span><strong>DOI:</strong> ${w.doi || "None"}</span>
           <span><strong>Type:</strong> ${w.type || "work"}</span>
+          ${w.issn ? `<span><strong>ISSN:</strong> ${w.issn}</span>` : ""}
         </div>
-        ${w.matchReason && w.duplicateStatus !== "New" ? `<div style="margin-top:6px;font-size:0.78rem;font-style:italic;color:#b45309;">${w.matchReason}</div>` : ""}
+        ${qualityInfo ? `<div style="margin-top:4px;">${qualityInfo}</div>` : ""}
+        ${w.matchReason && w.duplicateStatus !== "New" ? `<div style="margin-top:4px;font-size:0.78rem;font-style:italic;color:#b45309;">${w.matchReason}</div>` : ""}
       `;
 
       card.appendChild(cbCol);

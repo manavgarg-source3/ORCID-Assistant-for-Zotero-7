@@ -161,6 +161,40 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // 3. Single DOI Crossref Enrichment API
+  if (pathname === '/api/enrich-doi') {
+    const rawDoi = reqUrl.searchParams.get('doi');
+    if (!rawDoi) {
+      return sendJson(res, 400, {
+        success: false,
+        error: 'Missing required query parameter "doi". Example: ?doi=10.1000/182'
+      });
+    }
+
+    try {
+      const crData = await orcidClient.crossrefClient.fetchByDoi(rawDoi);
+      if (!crData) {
+        return sendJson(res, 404, {
+          success: false,
+          error: `Crossref record not found for DOI: ${rawDoi}`,
+          doi: rawDoi
+        });
+      }
+
+      return sendJson(res, 200, {
+        success: true,
+        doi: rawDoi,
+        data: crData
+      });
+    } catch (err) {
+      return sendJson(res, 500, {
+        success: false,
+        error: err.message,
+        doi: rawDoi
+      });
+    }
+  }
+
   // 404 Fallback
   sendJson(res, 404, {
     success: false,

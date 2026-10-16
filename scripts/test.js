@@ -615,11 +615,30 @@ try {
     const a5 = OA.parseAuthorName('');
     assert(a5.lastName === 'Unknown', 'Handles empty author string gracefully');
 
+    // 10b: normalizeCreator tests (Step 4.1)
+    console.log('\n-- Step 4.1: Creator Normalization Tests --');
+    assert(typeof OA.normalizeCreator === 'function', 'normalizeCreator function exists on plugin');
+    const c1 = OA.normalizeCreator({ given: 'Marie', family: 'Curie', sequence: 'first' });
+    assert(c1.firstName === 'Marie' && c1.lastName === 'Curie', 'Normalizes Crossref structured author with given and family');
+
+    const c2 = OA.normalizeCreator({ name: 'ATLAS Collaboration', sequence: 'additional' });
+    assert(c2.lastName === 'ATLAS Collaboration' && c2.fieldMode === 1, 'Normalizes Crossref institutional author with fieldMode=1');
+
+    const c3 = OA.normalizeCreator({ fullName: 'Josiah St. John Carberry' });
+    assert(c3.firstName === 'Josiah St. John' && c3.lastName === 'Carberry', 'Normalizes author object with fullName');
+
+    const c4 = OA.normalizeCreator('Lovelace, Ada');
+    assert(c4.firstName === 'Ada' && c4.lastName === 'Lovelace', 'Normalizes string author "Last, First"');
+
+    const c5 = OA.normalizeCreator(null);
+    assert(c5.lastName === 'Unknown', 'Handles null creator gracefully');
+
     // ==========================================
-    // Test 11: Step 4 Zotero Item Creation & Field Assignment
+    // Test 11: Step 4.1 Robust Zotero Item Creation & Field Assignment
     // ==========================================
-    console.log('\n-- Step 4: Zotero Item Creation & Field Assignment --');
+    console.log('\n-- Step 4.1: Robust Zotero Item Creation & Comprehensive Field Assignment --');
     assert(typeof OA.createZoteroItem === 'function', 'createZoteroItem exists on plugin');
+    assert(typeof OA.setItemFieldSafe === 'function', 'setItemFieldSafe exists on plugin');
 
     // Attach mock Zotero.Item constructor to sandbox
     let mockSavedItems = [];
@@ -631,6 +650,7 @@ try {
       this.getField = function(f) { return this.fields[f]; };
       this.setCreators = function(c) { this.creators = c; };
       this.getCreators = function() { return this.creators; };
+      this.isValidField = function(f) { return true; };
       this.saveTx = async function() {
         this.id = mockSavedItems.length + 100;
         mockSavedItems.push(this);
@@ -645,32 +665,131 @@ try {
       getName(id) { return 'My Library'; }
     };
 
-    const richWork = {
-      title: 'A Methodology for the Emulation of Architecture',
-      doi: 'https://doi.org/10.5555/12345680',
-      year: '2012',
-      journalTitle: 'Journal of Computer Science',
-      url: 'https://example.org/emulation-article',
-      orcid: '0000-0002-1825-0097',
-      putCode: '10987654',
+    // 11a: Journal Article mapping with complete Crossref + ORCID metadata
+    const richJournalWork = {
+      title: 'A Bibliometric Study of Pediatric Inguinal Hernia',
+      doi: 'https://doi.org/10.4103/jiaps.jiaps_27_22',
+      year: '2022',
+      date: '2022-11-15',
+      journalTitle: 'Journal of Indian Association of Pediatric Surgeons',
+      journalAbbreviation: 'J. Indian Assoc. Pediatr. Surg.',
+      volume: '27',
+      issue: '6',
+      pages: '689-698',
+      issn: '0971-9261',
+      url: 'https://doi.org/10.4103/jiaps.jiaps_27_22',
+      abstractNote: 'Background: Pediatric inguinal hernia landscape...',
+      language: 'en',
+      orcid: '0000-0001-5787-7143',
+      putCode: '133572295',
       type: 'journal-article',
-      authors: ['Carberry, Josiah', 'Lovelace, Ada']
+      sources: ['orcid', 'crossref'],
+      authors: [
+        { given: 'Anjan Kumar', family: 'Dhua', sequence: 'first' },
+        { given: 'Mohit', family: 'Garg', sequence: 'additional' },
+        { name: 'Research Collaborative Team', fieldMode: 1 }
+      ]
     };
 
-    const createdItem = await OA.createZoteroItem(richWork, 1);
-    assert(createdItem.itemType === 'journalArticle', 'Created item itemType is journalArticle');
-    assert(createdItem.getField('title') === 'A Methodology for the Emulation of Architecture', 'Item title set');
-    assert(createdItem.getField('DOI') === '10.5555/12345680', 'Item DOI set with normalized DOI (prefix stripped)');
-    assert(createdItem.getField('date') === '2012', 'Item publication year set to date field');
-    assert(createdItem.getField('publicationTitle') === 'Journal of Computer Science', 'Item journal title set');
-    assert(createdItem.getField('url') === 'https://example.org/emulation-article', 'Item URL set');
-    assert(createdItem.getField('extra').includes('ORCID: 0000-0002-1825-0097'), 'Extra field contains ORCID provenance');
-    assert(createdItem.getField('extra').includes('ORCID-Put-Code: 10987654'), 'Extra field contains put-code provenance');
-    assert(createdItem.getCreators().length === 2, 'Item creators assigned with 2 author records');
-    assert(createdItem.getCreators()[0].lastName === 'Carberry', 'Creator 1 lastName is Carberry');
-    assert(createdItem.getCreators()[1].lastName === 'Lovelace', 'Creator 2 lastName is Lovelace');
+    const journalItem = await OA.createZoteroItem(richJournalWork, 1);
+    assert(journalItem.itemType === 'journalArticle', 'Created item itemType is journalArticle');
+    assert(journalItem.getField('title') === 'A Bibliometric Study of Pediatric Inguinal Hernia', 'Item title set');
+    assert(journalItem.getField('DOI') === '10.4103/jiaps.jiaps_27_22', 'DOI normalized with prefix stripped');
+    assert(journalItem.getField('date') === '2022-11-15', 'Complete publication date YYYY-MM-DD set');
+    assert(journalItem.getField('publicationTitle') === 'Journal of Indian Association of Pediatric Surgeons', 'Journal title mapped to publicationTitle');
+    assert(journalItem.getField('publisher') === undefined, 'Publisher is NOT set for journal articles (proper field separation)');
+    assert(journalItem.getField('journalAbbreviation') === 'J. Indian Assoc. Pediatr. Surg.', 'Journal abbreviation mapped');
+    assert(journalItem.getField('volume') === '27', 'Volume mapped');
+    assert(journalItem.getField('issue') === '6', 'Issue mapped');
+    assert(journalItem.getField('pages') === '689-698', 'Page range preserved');
+    assert(journalItem.getField('ISSN') === '0971-9261', 'ISSN mapped');
+    assert(journalItem.getField('url') === 'https://doi.org/10.4103/jiaps.jiaps_27_22', 'URL mapped');
+    assert(journalItem.getField('abstractNote').includes('Pediatric inguinal hernia'), 'Abstract note mapped');
+    assert(journalItem.getField('language') === 'en', 'Language mapped');
+    assert(journalItem.getField('extra').includes('ORCID: 0000-0001-5787-7143'), 'Extra field contains ORCID iD');
+    assert(journalItem.getField('extra').includes('ORCID-Put-Code: 133572295'), 'Extra field contains Put-Code');
+    assert(journalItem.getField('extra').includes('Sources: ORCID, CROSSREF'), 'Extra field records source provenance');
+    assert(journalItem.getCreators().length === 3, 'Creators assigned with 3 records');
+    assert(journalItem.getCreators()[0].firstName === 'Anjan Kumar' && journalItem.getCreators()[0].lastName === 'Dhua', 'Creator 1 has given and family names');
+    assert(journalItem.getCreators()[2].lastName === 'Research Collaborative Team' && journalItem.getCreators()[2].fieldMode === 1, 'Creator 3 is institutional single-field author');
 
-    // Sparse work with missing fields
+    // 11b: Book mapping
+    const bookWork = {
+      title: 'Introduction to Algorithms',
+      type: 'book',
+      publisher: 'MIT Press',
+      isbn: '978-0262033848',
+      year: '2009',
+      date: '2009',
+      pages: '1312',
+      authors: ['Cormen, Thomas H.', 'Leiserson, Charles E.']
+    };
+    const bookItem = await OA.createZoteroItem(bookWork, 1);
+    assert(bookItem.itemType === 'book', 'Maps book to Zotero book itemType');
+    assert(bookItem.getField('publisher') === 'MIT Press', 'Book publisher mapped to publisher field');
+    assert(bookItem.getField('ISBN') === '978-0262033848', 'Book ISBN mapped to ISBN field');
+
+    // 11c: Conference Paper mapping
+    const confWork = {
+      title: 'Attention Is All You Need',
+      type: 'conference-paper',
+      journalTitle: 'Advances in Neural Information Processing Systems',
+      pages: '5998-6008',
+      year: '2017'
+    };
+    const confItem = await OA.createZoteroItem(confWork, 1);
+    assert(confItem.itemType === 'conferencePaper', 'Maps conference-paper to conferencePaper');
+    assert(confItem.getField('proceedingsTitle') === 'Advances in Neural Information Processing Systems', 'Proceedings title mapped');
+    assert(confItem.getField('pages') === '5998-6008', 'Conference paper pages mapped');
+
+    // 11d: Report mapping
+    const reportWork = {
+      title: 'Technical Report on Quantum Cryptography',
+      type: 'report',
+      publisher: 'NIST',
+      issue: 'NIST-SP-800-208',
+      year: '2020'
+    };
+    const reportItem = await OA.createZoteroItem(reportWork, 1);
+    assert(reportItem.itemType === 'report', 'Maps report to report');
+    assert(reportItem.getField('institution') === 'NIST', 'Report institution mapped');
+    assert(reportItem.getField('reportNumber') === 'NIST-SP-800-208', 'Report number mapped');
+
+    // 11e: Thesis mapping
+    const thesisWork = {
+      title: 'A Study on Machine Learning Optimization',
+      type: 'dissertation',
+      publisher: 'Stanford University',
+      year: '2021'
+    };
+    const thesisItem = await OA.createZoteroItem(thesisWork, 1);
+    assert(thesisItem.itemType === 'thesis', 'Maps dissertation to thesis');
+    assert(thesisItem.getField('university') === 'Stanford University', 'Thesis university mapped');
+
+    // 11f: Preprint & Dataset mapping
+    const preprintWork = {
+      title: 'A Preprint Study on Climate Modeling',
+      type: 'preprint',
+      journalTitle: 'arXiv',
+      doi: '10.48550/arXiv.2301.00001',
+      year: '2023'
+    };
+    const preprintItem = await OA.createZoteroItem(preprintWork, 1);
+    assert(preprintItem.itemType === 'preprint', 'Maps preprint to preprint');
+    assert(preprintItem.getField('repository') === 'arXiv', 'Preprint repository mapped');
+
+    const datasetWork = {
+      title: 'Global Temperature Dataset 1880-2023',
+      type: 'data-set',
+      journalTitle: 'Zenodo',
+      doi: '10.5281/zenodo.1234567',
+      year: '2023'
+    };
+    const datasetItem = await OA.createZoteroItem(datasetWork, 1);
+    assert(datasetItem.itemType === 'dataset', 'Maps data-set to dataset');
+    assert(datasetItem.getField('repository') === 'Zenodo', 'Dataset repository mapped');
+
+    // 11g: Sparse work handling
     const sparseWork = {
       title: null,
       doi: null,
@@ -681,6 +800,39 @@ try {
     assert(sparseItem.getField('title') === '(Untitled ORCID Publication)', 'Handled missing title with fallback');
     assert(sparseItem.getField('DOI') === undefined, 'Missing DOI not invented');
     assert(sparseItem.getField('date') === undefined, 'Missing date not invented');
+
+    // ==========================================
+    // Test 11.1: Step 4.1 Metadata Quality Assessment
+    // ==========================================
+    console.log('\n-- Step 4.1: Metadata Quality Assessment Tests --');
+    assert(typeof OA.assessMetadataQuality === 'function', 'assessMetadataQuality function exists on plugin');
+
+    const qualityComplete = OA.assessMetadataQuality(richJournalWork);
+    assert(qualityComplete.isEnriched === true, 'Quality assessment identifies Crossref enrichment');
+    assert(qualityComplete.sourceSummary === 'ORCID + Crossref', 'Source summary reports ORCID + Crossref');
+    assert(qualityComplete.availableFields.includes('Title'), 'Available fields includes Title');
+    assert(qualityComplete.availableFields.includes('Authors'), 'Available fields includes Authors');
+    assert(qualityComplete.availableFields.includes('Journal/Source'), 'Available fields includes Journal/Source');
+    assert(qualityComplete.availableFields.includes('Volume'), 'Available fields includes Volume');
+    assert(qualityComplete.availableFields.includes('Issue'), 'Available fields includes Issue');
+    assert(qualityComplete.availableFields.includes('Pages'), 'Available fields includes Pages');
+    assert(qualityComplete.availableFields.includes('ISSN'), 'Available fields includes ISSN');
+    assert(qualityComplete.completenessScore >= 80, 'Complete work has high completeness score (>=80%)');
+
+    const incompleteWork = {
+      title: 'Incomplete Publication',
+      year: '2020',
+      doi: null,
+      journalTitle: null,
+      authors: []
+    };
+    const qualityIncomplete = OA.assessMetadataQuality(incompleteWork);
+    assert(qualityIncomplete.isEnriched === false, 'Identifies incomplete work as not enriched');
+    assert(qualityIncomplete.sourceSummary === 'ORCID', 'Source is ORCID only');
+    assert(qualityIncomplete.missingFields.includes('Authors'), 'Identifies missing Authors');
+    assert(qualityIncomplete.missingFields.includes('DOI'), 'Identifies missing DOI');
+    assert(qualityIncomplete.missingFields.includes('Journal/Source'), 'Identifies missing Journal/Source');
+    assert(qualityIncomplete.completenessScore < 40, 'Incomplete work reports low completeness score (<40%)');
 
     // ==========================================
     // Test 12: Step 4 Import Execution & Duplicate Recheck Safeguards
