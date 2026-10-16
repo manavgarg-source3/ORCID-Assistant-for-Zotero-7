@@ -10,7 +10,7 @@
 
 This plugin implements the restartless bootstrapped extension architecture required by **Zotero 7+** (Firefox 115+ Gecko runtime):
 
-* **`src/manifest.json`**: WebExtension-style manifest with `manifest_version: 2`, specifying strict compatibility bounds (`7.0` to `20.*`) under `applications.zotero` and `browser_specific_settings.zotero`.
+* **`src/manifest.json`**: WebExtension-style manifest with `manifest_version: 2`, specifying strict compatibility bounds (`7.0` to `10.0.*`) and mandatory `update_url` under `applications.zotero` as required by official Zotero documentation.
 * **`src/bootstrap.js`**: Gecko restartless lifecycle hooks (`install`, `startup`, `shutdown`, `uninstall`, `onMainWindowLoad`, `onMainWindowUnload`).
 * **`src/orcid-assistant.js`**: Core plugin logic. Implements UI injection into the main menubar (`Tools -> ORCID Assistant`) and context menus (`Zotero.MenuManager`).
 * **`src/locale/en-US/orcid-assistant.ftl`**: Project Fluent localization strings.
@@ -97,3 +97,4 @@ The test suite performs 33 automated checks:
 * **No External Network Calls**: Does not query the ORCID API or send telemetry.
 * **No Zotero Core Modifications**: Fully contained within the independent `.xpi` add-on.
 * **Clean Unload**: Zero residual DOM elements or memory leaks upon disable or uninstall.
+

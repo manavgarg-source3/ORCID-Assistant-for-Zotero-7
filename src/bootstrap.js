@@ -97,3 +97,4 @@ function shutdown(data, reason) {
 function uninstall(data, reason) {
   log(`Plugin uninstalled (reason: ${reason})`);
 }
+

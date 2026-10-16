@@ -46,10 +46,12 @@ try {
   assert(manifest.name === 'ORCID Assistant', 'Plugin name is "ORCID Assistant"');
   assert(manifest.version === '1.0.0', 'Plugin version is specified');
 
-  const appConfig = manifest.applications?.zotero || manifest.browser_specific_settings?.zotero;
-  assert(!!appConfig, 'Zotero application configuration block present');
+  const appConfig = manifest.applications?.zotero;
+  assert(!!appConfig, 'applications.zotero block present');
   assert(appConfig.id === 'orcid-assistant@zotero.org', 'Plugin ID is orcid-assistant@zotero.org');
+  assert(!!appConfig.update_url, 'applications.zotero.update_url is defined');
   assert(appConfig.strict_min_version === '7.0', 'strict_min_version targets 7.0+');
+  assert(appConfig.strict_max_version === '10.0.*', 'strict_max_version targets 10.0.* for installed Zotero 10.0.6');
 } catch (e) {
   assert(false, `Manifest JSON is valid: ${e.message}`);
 }
@@ -209,3 +211,4 @@ try {
 } catch (e) {
   assert(false, `Lifecycle execution failed: ${e.stack}`);
 }
+

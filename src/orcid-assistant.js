@@ -256,3 +256,4 @@ var ORCIDAssistant = {
     this.log("ORCID Assistant main() completed readiness check.");
   }
 };
+

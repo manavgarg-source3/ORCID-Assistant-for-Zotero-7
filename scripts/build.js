@@ -37,11 +37,17 @@ try {
   if (!manifest.manifest_version || !manifest.name || !manifest.version) {
     throw new Error('manifest.json is missing required fields (manifest_version, name, version)');
   }
-  const zoteroApp = manifest.applications?.zotero || manifest.browser_specific_settings?.zotero;
+  const zoteroApp = manifest.applications?.zotero;
   if (!zoteroApp || !zoteroApp.id) {
-    throw new Error('manifest.json must specify an application id for zotero');
+    throw new Error('manifest.json must specify an applications.zotero.id');
   }
-  console.log(`✔ Manifest valid: ${manifest.name} v${manifest.version} (ID: ${zoteroApp.id})`);
+  if (!zoteroApp.update_url) {
+    throw new Error('manifest.json must specify applications.zotero.update_url (mandatory in Zotero)');
+  }
+  if (!zoteroApp.strict_min_version || !zoteroApp.strict_max_version) {
+    throw new Error('manifest.json must specify applications.zotero.strict_min_version and strict_max_version');
+  }
+  console.log(`✔ Manifest valid: ${manifest.name} v${manifest.version} (ID: ${zoteroApp.id}, Range: ${zoteroApp.strict_min_version} - ${zoteroApp.strict_max_version})`);
 } catch (e) {
   console.error(`ERROR: manifest.json validation failed: ${e.message}`);
   process.exit(1);
@@ -91,3 +97,4 @@ console.log(`  Size: ${(stats.size / 1024).toFixed(2)} KB`);
 console.log(`  Archive Entries (${zipEntries.length}):`);
 zipEntries.forEach(entry => console.log(`    - ${entry}`));
 console.log('\nBuild completed successfully.');
+
