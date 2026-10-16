@@ -205,6 +205,12 @@ var ORCIDAssistant = {
       let doc = window.document;
       if (!doc) return;
 
+      let modal = doc.getElementById("orcid-assistant-modal-overlay");
+      if (modal) {
+        modal.remove();
+        this.log("Removed active ORCID Assistant modal dialog.");
+      }
+
       for (let id of this.addedElementIDs) {
         let el = doc.getElementById(id);
         if (el) {
@@ -848,32 +854,692 @@ var ORCIDAssistant = {
       result.works = annotatedWorks;
       result.duplicateStats = duplicateStats;
 
-      // Success: Display read-only preview
-      const previewText = this.formatWorksPreview(result);
-      const totalCount = result.totalWorks ?? result.data?.totalWorks ?? 0;
-      if (typeof promptService.alert === "function") {
-        promptService.alert(
-          window || null,
-          `ORCID Public Works Preview (${totalCount} works found)`,
-          previewText
-        );
+      // Step 4: Show the interactive selection and import UI
+      if (window && window.document && typeof window.document.createElement === "function" && (window.document.body || window.document.documentElement)) {
+        this.showImportModal(window, result);
+        return;
+      } else {
+        await this.promptImportSelectionFallback(window, result);
+        return;
       }
+    }
+  },
 
-      // Ask if user wants to fetch for another ORCID iD
-      let fetchAnother = promptService.confirm
-        ? promptService.confirm(
-            window || null,
-            "ORCID Assistant",
-            "Would you like to fetch public works for another ORCID iD?"
-          )
-        : false;
+  /**
+   * Resolve target library ID (user's selected or primary library).
+   */
+  getTargetLibraryID(libraryID) {
+    if (libraryID) return libraryID;
+    if (typeof Zotero !== "undefined") {
+      if (Zotero.getActiveZoteroPane && typeof Zotero.getActiveZoteroPane === "function") {
+        try {
+          const paneLibID = Zotero.getActiveZoteroPane()?.getSelectedLibraryID();
+          if (paneLibID) return paneLibID;
+        } catch (e) {}
+      }
+      if (Zotero.Libraries && Zotero.Libraries.userLibraryID) {
+        return Zotero.Libraries.userLibraryID;
+      }
+    }
+    return 1;
+  },
 
-      if (fetchAnother) {
-        currentInput = "";
+  /**
+   * Resolve target library human-readable name.
+   */
+  getTargetLibraryName(libraryID) {
+    if (typeof Zotero !== "undefined" && Zotero.Libraries && typeof Zotero.Libraries.getName === "function") {
+      try {
+        const name = Zotero.Libraries.getName(libraryID);
+        if (name) return name;
+      } catch (e) {}
+    }
+    return "My Library";
+  },
+
+  /**
+   * Map ORCID work types to official Zotero item types.
+   */
+  mapOrcidTypeToZotero(orcidType) {
+    if (!orcidType || typeof orcidType !== "string") return "journalArticle";
+    const t = orcidType.toLowerCase().replace(/_/g, "-");
+    switch (t) {
+      case "journal-article":
+      case "journal-issue":
+        return "journalArticle";
+      case "book":
+      case "edited-book":
+        return "book";
+      case "book-chapter":
+      case "book-section":
+        return "bookSection";
+      case "conference-paper":
+      case "conference-abstract":
+      case "proceedings-article":
+        return "conferencePaper";
+      case "report":
+        return "report";
+      case "dissertation":
+      case "dissertation-thesis":
+        return "thesis";
+      case "patent":
+        return "patent";
+      case "preprint":
+        return "preprint";
+      case "magazine-article":
+        return "magazineArticle";
+      case "newspaper-article":
+        return "newspaperArticle";
+      case "data-set":
+        return "dataset";
+      case "working-paper":
+      case "manuscript":
+        return "manuscript";
+      default:
+        return "journalArticle";
+    }
+  },
+
+  /**
+   * Parse a raw author string into Zotero creator object.
+   */
+  parseAuthorName(rawName) {
+    if (typeof rawName !== "string" || !rawName.trim()) {
+      return { lastName: "Unknown", creatorType: "author" };
+    }
+    const trimmed = rawName.trim();
+    if (trimmed.includes(",")) {
+      const parts = trimmed.split(",").map(p => p.trim());
+      return {
+        lastName: parts[0] || "",
+        firstName: parts.slice(1).join(" ") || "",
+        creatorType: "author"
+      };
+    }
+    // Check for single institution or organizational team/collaboration name
+    const orgPattern = /\b(collaboration|consortium|group|team|committee|initiative|organization|organisation|university|institute|centre|center|department|laboratory|lab|agency|commission|foundation)\b/i;
+    const spaceParts = trimmed.split(/\s+/);
+    if (spaceParts.length === 1 || orgPattern.test(trimmed)) {
+      return {
+        lastName: trimmed,
+        fieldMode: 1,
+        creatorType: "author"
+      };
+    }
+    const lastName = spaceParts.pop();
+    const firstName = spaceParts.join(" ");
+    return {
+      firstName,
+      lastName,
+      creatorType: "author"
+    };
+  },
+
+  /**
+   * Create and populate a Zotero.Item instance from ORCID work metadata.
+   */
+  async createZoteroItem(work, targetLibraryID) {
+    const zoteroType = this.mapOrcidTypeToZotero(work.type);
+    const libID = this.getTargetLibraryID(targetLibraryID);
+
+    let item;
+    if (typeof Zotero !== "undefined" && typeof Zotero.Item === "function") {
+      try {
+        let typeID = (Zotero.ItemTypes && typeof Zotero.ItemTypes.getID === "function")
+          ? Zotero.ItemTypes.getID(zoteroType)
+          : zoteroType;
+        item = new Zotero.Item(typeID || "journalArticle");
+      } catch (e) {
+        item = new Zotero.Item("journalArticle");
+      }
+    } else if (typeof Zotero !== "undefined" && Zotero.Items && typeof Zotero.Items.new === "function") {
+      item = await Zotero.Items.new(zoteroType);
+    } else {
+      // Mock item for test environments
+      item = {
+        itemType: zoteroType,
+        libraryID: libID,
+        fields: {},
+        creators: [],
+        setField(f, v) { this.fields[f] = v; },
+        getField(f) { return this.fields[f]; },
+        setCreators(c) { this.creators = c; },
+        getCreators() { return this.creators; },
+        async saveTx() { this.id = Math.floor(Math.random() * 100000) + 1; return this.id; }
+      };
+    }
+
+    if (item && libID) {
+      item.libraryID = libID;
+    }
+
+    // Title (required)
+    const title = (work.title || "").trim() || "(Untitled ORCID Publication)";
+    item.setField("title", title);
+
+    // DOI (if available)
+    const normDoi = this.normalizeDoi(work.doi);
+    if (normDoi) {
+      try {
+        item.setField("DOI", normDoi);
+      } catch (e) {
+        try { item.setField("doi", normDoi); } catch (e2) {}
+      }
+    }
+
+    // Publication Year / Date (if available)
+    const year = this.extractYear(work.year);
+    if (year) {
+      try {
+        item.setField("date", year);
+      } catch (e) {}
+    }
+
+    // Publication / Journal Title (if available)
+    if (work.journalTitle) {
+      try {
+        item.setField("publicationTitle", work.journalTitle);
+      } catch (e) {
+        try { item.setField("publisher", work.journalTitle); } catch (e2) {}
+      }
+    }
+
+    // URL (if available)
+    if (work.url) {
+      try {
+        item.setField("url", work.url);
+      } catch (e) {}
+    }
+
+    // Extra provenance
+    const extraLines = [];
+    if (work.orcid) {
+      extraLines.push(`ORCID: ${work.orcid}`);
+    }
+    if (work.putCode) {
+      extraLines.push(`ORCID-Put-Code: ${work.putCode}`);
+    }
+    if (extraLines.length > 0) {
+      try {
+        const existingExtra = (typeof item.getField === "function") ? (item.getField("extra") || "") : "";
+        const combined = existingExtra ? `${existingExtra}\n${extraLines.join("\n")}` : extraLines.join("\n");
+        item.setField("extra", combined);
+      } catch (e) {}
+    }
+
+    // Creators / Authors
+    const authors = Array.isArray(work.authors) && work.authors.length > 0
+      ? work.authors
+      : (work.author ? [work.author] : []);
+
+    if (authors.length > 0) {
+      const creators = [];
+      for (const a of authors) {
+        if (!a || typeof a !== "string") continue;
+        creators.push(this.parseAuthorName(a));
+      }
+      if (creators.length > 0) {
+        try {
+          item.setCreators(creators);
+        } catch (e) {
+          this.logError(e);
+        }
+      }
+    }
+
+    return item;
+  },
+
+  /**
+   * Import selected publications into the local Zotero library.
+   * Rechecks for duplicates immediately before saving to prevent duplicate imports.
+   */
+  async importPublications(selectedWorks, targetLibraryID) {
+    if (!Array.isArray(selectedWorks) || selectedWorks.length === 0) {
+      return { success: true, imported: 0, skipped: 0, failed: 0, errors: [], importedItems: [] };
+    }
+
+    const libID = this.getTargetLibraryID(targetLibraryID);
+
+    // 1. Recheck duplicates against current library state immediately before saving
+    const currentLibraryItems = await this.getLocalLibraryItems(libID);
+    const recheckedWorks = this.detectDuplicates(selectedWorks, currentLibraryItems);
+
+    let imported = 0;
+    let skipped = 0;
+    let failed = 0;
+    const errors = [];
+    const importedItems = [];
+
+    // Working copy of library items to prevent intra-batch duplicate creation
+    const workingLibraryItems = [...currentLibraryItems];
+
+    for (const work of recheckedWorks) {
+      // Recheck against current working library items (intra-batch duplicate prevention)
+      const currentCheck = this.detectDuplicates([work], workingLibraryItems);
+      if (currentCheck[0].duplicateStatus === "Already in Zotero") {
+        this.log(`Skipping duplicate publication: "${work.title}" (DOI: ${work.doi || "None"})`);
+        skipped++;
         continue;
       }
 
+      try {
+        const item = await this.createZoteroItem(work, libID);
+        // Supported Zotero save mechanism
+        if (typeof item.saveTx === "function") {
+          await item.saveTx();
+        } else if (typeof item.save === "function") {
+          await item.save();
+        }
+
+        imported++;
+        importedItems.push(item);
+        this.log(`Successfully created Zotero item for: "${work.title}" (ID: ${item.id})`);
+
+        // Add newly imported item to working items for subsequent intra-batch checks
+        workingLibraryItems.push({
+          id: item.id,
+          title: work.title,
+          doi: work.doi,
+          year: work.year,
+          author: work.author,
+          authors: work.authors
+        });
+      } catch (err) {
+        failed++;
+        errors.push({ title: work.title, error: err.message });
+        this.logError(`Failed to save Zotero item for "${work.title}": ${err.message}`);
+      }
+    }
+
+    return {
+      success: failed === 0,
+      imported,
+      skipped,
+      failed,
+      errors,
+      importedItems
+    };
+  },
+
+  /**
+   * Confirm import of possible duplicate publications.
+   */
+  confirmPossibleDuplicates(window, possibleDups) {
+    const promptService = (typeof Services !== "undefined" && Services.prompt) ? Services.prompt : null;
+    if (!promptService || typeof promptService.confirm !== "function") return true;
+
+    const dupList = possibleDups.slice(0, 5).map(d => `• "${d.title}" (${d.year || "N/A"}) - ${d.matchReason || "Matches local item"}`).join("\n");
+    const moreNote = possibleDups.length > 5 ? `\n... and ${possibleDups.length - 5} more.` : "";
+
+    return promptService.confirm(
+      window || null,
+      "ORCID Assistant - Confirm Import of Possible Duplicates",
+      `CAUTION: You have selected ${possibleDups.length} record(s) flagged as Possible Duplicate:\n\n${dupList}${moreNote}\n\nImporting these records may create duplicate items in your Zotero library.\n\nDo you want to proceed with importing them?`
+    );
+  },
+
+  /**
+   * Final confirmation prompt before executing import.
+   */
+  confirmImport(window, selectedWorks, targetLibraryID) {
+    const promptService = (typeof Services !== "undefined" && Services.prompt) ? Services.prompt : null;
+    if (!promptService || typeof promptService.confirm !== "function") return true;
+
+    const libID = this.getTargetLibraryID(targetLibraryID);
+    const libraryName = this.getTargetLibraryName(libID);
+    const newCount = selectedWorks.filter(w => w.duplicateStatus === "New").length;
+    const possibleCount = selectedWorks.filter(w => w.duplicateStatus === "Possible Duplicate").length;
+    const alreadyCount = selectedWorks.filter(w => w.duplicateStatus === "Already in Zotero").length;
+
+    let breakdown = `• New records: ${newCount}`;
+    if (possibleCount > 0) breakdown += `\n• Possible duplicates: ${possibleCount}`;
+    if (alreadyCount > 0) breakdown += `\n• Already in library: ${alreadyCount}`;
+
+    return promptService.confirm(
+      window || null,
+      "ORCID Assistant - Confirm Import",
+      `You are about to import ${selectedWorks.length} publication(s) into your local Zotero library.\n\nDestination: ${libraryName}\n${breakdown}\n\nDo you want to proceed?`
+    );
+  },
+
+  /**
+   * Interactive modal dialog with checkboxes, controls, and import actions.
+   */
+  showImportModal(window, result) {
+    const doc = window.document;
+    if (!doc) return;
+
+    // Clean up existing modal if already open
+    const existingOverlay = doc.getElementById("orcid-assistant-modal-overlay");
+    if (existingOverlay) {
+      existingOverlay.remove();
+    }
+
+    const works = Array.isArray(result.works) ? result.works : [];
+    const orcid = result.orcid || "N/A";
+    const totalCount = works.length;
+
+    // Initialize selection state: New works selected by default, others unselected
+    works.forEach(w => {
+      if (w.selected === undefined) {
+        w.selected = (w.duplicateStatus === "New");
+      }
+    });
+
+    const overlay = doc.createElement("div");
+    overlay.id = "orcid-assistant-modal-overlay";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100vw;height:100vh;background-color:rgba(0,0,0,0.5);display:flex;justify-content:center;align-items:center;z-index:999999;font-family:system-ui,-apple-system,sans-serif;box-sizing:border-box;";
+
+    const modal = doc.createElement("div");
+    modal.id = "orcid-assistant-modal";
+    modal.style.cssText = "width:780px;max-width:92vw;max-height:88vh;background:#ffffff;color:#1e293b;border-radius:10px;box-shadow:0 20px 25px -5px rgba(0,0,0,0.25);display:flex;flex-direction:column;overflow:hidden;border:1px solid #cbd5e1;";
+
+    // Header
+    const header = doc.createElement("div");
+    header.style.cssText = "padding:16px 20px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;background:#f8fafc;";
+    header.innerHTML = `
+      <div>
+        <h3 style="margin:0;font-size:1.15rem;font-weight:700;color:#0f172a;">ORCID Assistant — Public Works Import</h3>
+        <p style="margin:4px 0 0 0;font-size:0.85rem;color:#64748b;">ORCID iD: <strong>${orcid}</strong> • ${totalCount} Public Works Found</p>
+      </div>
+    `;
+
+    const closeBtn = doc.createElement("button");
+    closeBtn.textContent = "×";
+    closeBtn.style.cssText = "background:transparent;border:none;font-size:1.5rem;cursor:pointer;color:#64748b;line-height:1;padding:4px 8px;border-radius:4px;";
+    closeBtn.addEventListener("click", () => overlay.remove());
+    header.appendChild(closeBtn);
+    modal.appendChild(header);
+
+    // Toolbar / Stats Bar
+    const stats = result.duplicateStats || this.computeDuplicateStats(works);
+    const toolbar = doc.createElement("div");
+    toolbar.style.cssText = "padding:12px 20px;background:#f1f5f9;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;";
+
+    const badgesContainer = doc.createElement("div");
+    badgesContainer.style.cssText = "display:flex;gap:6px;align-items:center;";
+    badgesContainer.innerHTML = `
+      <span style="font-size:0.75rem;font-weight:600;padding:3px 8px;border-radius:9999px;background:#e2e8f0;color:#475569;">Already in Zotero: ${stats.alreadyCount}</span>
+      <span style="font-size:0.75rem;font-weight:600;padding:3px 8px;border-radius:9999px;background:#fef3c7;color:#92400e;">Possible Duplicate: ${stats.possibleCount}</span>
+      <span style="font-size:0.75rem;font-weight:600;padding:3px 8px;border-radius:9999px;background:#dcfce7;color:#166534;">New: ${stats.newCount}</span>
+    `;
+
+    const actionsContainer = doc.createElement("div");
+    actionsContainer.style.cssText = "display:flex;gap:8px;align-items:center;";
+
+    const selectionSummary = doc.createElement("span");
+    selectionSummary.id = "orcid-selection-summary";
+    selectionSummary.style.cssText = "font-size:0.82rem;font-weight:600;color:#334155;margin-right:4px;";
+
+    const btnSelectNew = doc.createElement("button");
+    btnSelectNew.textContent = "Select New";
+    btnSelectNew.style.cssText = "padding:5px 10px;font-size:0.8rem;font-weight:500;background:#ffffff;border:1px solid #cbd5e1;border-radius:5px;cursor:pointer;color:#334155;";
+
+    const btnClearSelection = doc.createElement("button");
+    btnClearSelection.textContent = "Clear Selection";
+    btnClearSelection.style.cssText = "padding:5px 10px;font-size:0.8rem;font-weight:500;background:#ffffff;border:1px solid #cbd5e1;border-radius:5px;cursor:pointer;color:#334155;";
+
+    actionsContainer.appendChild(selectionSummary);
+    actionsContainer.appendChild(btnSelectNew);
+    actionsContainer.appendChild(btnClearSelection);
+
+    toolbar.appendChild(badgesContainer);
+    toolbar.appendChild(actionsContainer);
+    modal.appendChild(toolbar);
+
+    // Warning banner for selected possible duplicates
+    const warningBanner = doc.createElement("div");
+    warningBanner.id = "orcid-warning-banner";
+    warningBanner.style.cssText = "background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;padding:8px 20px;font-size:0.82rem;display:none;";
+    modal.appendChild(warningBanner);
+
+    // Scrollable Body
+    const body = doc.createElement("div");
+    body.style.cssText = "padding:16px 20px;overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:12px;";
+
+    const checkboxes = [];
+
+    works.forEach((w, idx) => {
+      const card = doc.createElement("div");
+      card.className = "orcid-work-card";
+      card.style.cssText = "border:1px solid #e2e8f0;border-radius:6px;padding:12px;display:flex;gap:12px;background:#ffffff;";
+
+      const cbCol = doc.createElement("div");
+      cbCol.style.cssText = "padding-top:2px;";
+
+      const cb = doc.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!w.selected;
+      cb.style.cssText = "width:17px;height:17px;cursor:pointer;";
+      cb.addEventListener("change", (e) => {
+        w.selected = e.target.checked;
+        updateUI();
+      });
+      checkboxes.push(cb);
+      cbCol.appendChild(cb);
+
+      const contentCol = doc.createElement("div");
+      contentCol.style.cssText = "flex:1;min-width:0;";
+
+      // Status pill styling
+      let pillBg = "#dcfce7";
+      let pillColor = "#166534";
+      if (w.duplicateStatus === "Already in Zotero") {
+        pillBg = "#e2e8f0";
+        pillColor = "#475569";
+      } else if (w.duplicateStatus === "Possible Duplicate") {
+        pillBg = "#fef3c7";
+        pillColor = "#92400e";
+      }
+
+      const authorsText = w.author || (Array.isArray(w.authors) && w.authors.length > 0 ? w.authors.join(", ") : "Not specified");
+
+      contentCol.innerHTML = `
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;">
+          <div style="font-weight:600;font-size:0.95rem;color:#0f172a;line-height:1.35;">${w.title || "(Untitled Publication)"}</div>
+          <span style="font-size:0.75rem;font-weight:600;padding:2px 8px;border-radius:9999px;background:${pillBg};color:${pillColor};white-space:nowrap;">${w.duplicateStatus}</span>
+        </div>
+        <div style="font-size:0.85rem;color:#475569;margin-bottom:6px;">${authorsText}</div>
+        <div style="font-size:0.8rem;color:#64748b;display:flex;flex-wrap:wrap;gap:12px;">
+          <span><strong>Year:</strong> ${w.year || "N/A"}</span>
+          <span><strong>DOI:</strong> ${w.doi || "None"}</span>
+          <span><strong>Type:</strong> ${w.type || "work"}</span>
+        </div>
+        ${w.matchReason && w.duplicateStatus !== "New" ? `<div style="margin-top:6px;font-size:0.78rem;font-style:italic;color:#b45309;">${w.matchReason}</div>` : ""}
+      `;
+
+      card.appendChild(cbCol);
+      card.appendChild(contentCol);
+      body.appendChild(card);
+    });
+
+    modal.appendChild(body);
+
+    // Footer
+    const footer = doc.createElement("div");
+    footer.style.cssText = "padding:14px 20px;border-top:1px solid #e2e8f0;background:#f8fafc;display:flex;justify-content:space-between;align-items:center;";
+
+    const footerInfo = doc.createElement("div");
+    footerInfo.style.cssText = "font-size:0.8rem;color:#64748b;";
+    footerInfo.textContent = "Destination: Local Library • Strictly read-only from ORCID";
+
+    const footerActions = doc.createElement("div");
+    footerActions.style.cssText = "display:flex;gap:10px;";
+
+    const btnCancel = doc.createElement("button");
+    btnCancel.textContent = "Cancel";
+    btnCancel.style.cssText = "padding:7px 14px;font-size:0.88rem;background:#ffffff;border:1px solid #cbd5e1;border-radius:6px;cursor:pointer;color:#334155;";
+    btnCancel.addEventListener("click", () => overlay.remove());
+
+    const btnImport = doc.createElement("button");
+    btnImport.style.cssText = "padding:7px 18px;font-size:0.88rem;font-weight:600;background:#2563eb;color:#ffffff;border:none;border-radius:6px;cursor:pointer;";
+
+    footerActions.appendChild(btnCancel);
+    footerActions.appendChild(btnImport);
+    footer.appendChild(footerInfo);
+    footer.appendChild(footerActions);
+    modal.appendChild(footer);
+
+    overlay.appendChild(modal);
+    (doc.body || doc.documentElement).appendChild(overlay);
+    this.storeAddedElement("orcid-assistant-modal-overlay");
+
+    // Dynamic UI update function
+    const updateUI = () => {
+      let selectedCount = 0;
+      let possibleDupsCount = 0;
+      let alreadyCount = 0;
+
+      works.forEach((w, i) => {
+        if (checkboxes[i].checked) {
+          selectedCount++;
+          if (w.duplicateStatus === "Possible Duplicate") possibleDupsCount++;
+          if (w.duplicateStatus === "Already in Zotero") alreadyCount++;
+        }
+      });
+
+      selectionSummary.textContent = `${selectedCount} of ${works.length} selected`;
+      btnImport.textContent = `Import Selected (${selectedCount})`;
+      btnImport.disabled = (selectedCount === 0);
+      btnImport.style.background = (selectedCount === 0) ? "#94a3b8" : "#2563eb";
+
+      if (possibleDupsCount > 0 || alreadyCount > 0) {
+        warningBanner.style.display = "block";
+        warningBanner.textContent = `⚠ Warning: ${possibleDupsCount + alreadyCount} record(s) flagged as Possible Duplicate / Already in Zotero selected. Explicit confirmation will be required before saving.`;
+      } else {
+        warningBanner.style.display = "none";
+      }
+    };
+
+    // Button event listeners
+    btnSelectNew.addEventListener("click", () => {
+      works.forEach((w, i) => {
+        const isNew = (w.duplicateStatus === "New");
+        w.selected = isNew;
+        checkboxes[i].checked = isNew;
+      });
+      updateUI();
+    });
+
+    btnClearSelection.addEventListener("click", () => {
+      works.forEach((w, i) => {
+        w.selected = false;
+        checkboxes[i].checked = false;
+      });
+      updateUI();
+    });
+
+    btnImport.addEventListener("click", async () => {
+      const selectedWorks = works.filter((w, i) => checkboxes[i].checked);
+      if (selectedWorks.length === 0) return;
+
+      // 1. Cautious confirmation for Possible Duplicates / Already in Library
+      const possibleDups = selectedWorks.filter(w => w.duplicateStatus === "Possible Duplicate" || w.duplicateStatus === "Already in Zotero");
+      if (possibleDups.length > 0) {
+        const proceedWithDups = this.confirmPossibleDuplicates(window, possibleDups);
+        if (!proceedWithDups) {
+          return;
+        }
+      }
+
+      // 2. Final confirmation dialog
+      const proceed = this.confirmImport(window, selectedWorks);
+      if (!proceed) {
+        return;
+      }
+
+      // 3. Execute import
+      btnImport.disabled = true;
+      btnImport.textContent = "Importing...";
+      btnCancel.disabled = true;
+
+      try {
+        const targetLibraryID = this.getTargetLibraryID();
+        const importRes = await this.importPublications(selectedWorks, targetLibraryID);
+
+        // 4. Report summary
+        let summaryMsg = `Import completed!\n\n` +
+          `✔ Successfully imported: ${importRes.imported} publication(s)\n` +
+          `⚠ Skipped (duplicates): ${importRes.skipped}\n` +
+          `❌ Failed: ${importRes.failed}`;
+        if (importRes.errors && importRes.errors.length > 0) {
+          summaryMsg += `\n\nErrors:\n` + importRes.errors.map(e => `• ${e.title}: ${e.error}`).join("\n");
+        }
+
+        if (typeof Services !== "undefined" && Services.prompt) {
+          Services.prompt.alert(window, "ORCID Assistant - Import Summary", summaryMsg);
+        }
+
+        // 5. Refresh modal statuses and duplicate detection
+        const updatedLocalItems = await this.getLocalLibraryItems(targetLibraryID);
+        const refreshedWorks = this.detectDuplicates(works, updatedLocalItems);
+        result.works = refreshedWorks;
+        result.duplicateStats = this.computeDuplicateStats(refreshedWorks);
+
+        // Close and reopen refreshed modal
+        overlay.remove();
+        this.showImportModal(window, result);
+      } catch (err) {
+        this.logError(err);
+        btnImport.disabled = false;
+        btnCancel.disabled = false;
+        if (typeof Services !== "undefined" && Services.prompt) {
+          Services.prompt.alert(window, "ORCID Assistant - Import Error", `An error occurred during import: ${err.message}`);
+        }
+      }
+    });
+
+    // Initial render
+    updateUI();
+  },
+
+  /**
+   * Headless / prompt-based fallback for environments without DOM modal rendering.
+   */
+  async promptImportSelectionFallback(window, result) {
+    const promptService = (typeof Services !== "undefined" && Services.prompt) ? Services.prompt : null;
+    const previewText = this.formatWorksPreview(result);
+    const totalCount = result.totalWorks ?? result.data?.totalWorks ?? (result.works?.length || 0);
+
+    if (promptService && typeof promptService.alert === "function") {
+      promptService.alert(
+        window || null,
+        `ORCID Public Works Preview (${totalCount} works found)`,
+        previewText
+      );
+    }
+
+    const newWorks = (result.works || []).filter(w => w.duplicateStatus === "New");
+    if (newWorks.length === 0) {
+      if (promptService && typeof promptService.alert === "function") {
+        promptService.alert(
+          window || null,
+          "ORCID Assistant",
+          "No new publications available for import."
+        );
+      }
       return;
+    }
+
+    const confirmImport = promptService && typeof promptService.confirm === "function"
+      ? promptService.confirm(
+          window || null,
+          "ORCID Assistant - Confirm Import",
+          `Would you like to import ${newWorks.length} new publication(s) into your local Zotero library?`
+        )
+      : false;
+
+    if (confirmImport) {
+      const targetLibraryID = this.getTargetLibraryID();
+      const importRes = await this.importPublications(newWorks, targetLibraryID);
+      if (promptService && typeof promptService.alert === "function") {
+        promptService.alert(
+          window || null,
+          "ORCID Assistant - Import Complete",
+          `Import finished:\n✔ Successfully imported: ${importRes.imported}\n⚠ Skipped: ${importRes.skipped}\n❌ Failed: ${importRes.failed}`
+        );
+      }
     }
   },
 

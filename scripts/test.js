@@ -586,10 +586,332 @@ try {
     assert(alertMsg.includes('READ-ONLY PREVIEW'), 'Preview includes read-only disclaimer');
 
     // ==========================================
-    // Test 10: Strict Read-Only Verification
+    // Test 10: Step 4 Metadata Mapping & Author Parsing Tests
     // ==========================================
-    console.log('\n-- Step 3: Strict Read-Only Verification --');
-    assert(sandbox.Zotero.Items === undefined, 'No Zotero.Items API write operations exist');
+    console.log('\n-- Step 4: Metadata Mapping & Author Parsing Tests --');
+    assert(typeof OA.mapOrcidTypeToZotero === 'function', 'mapOrcidTypeToZotero function exists on plugin');
+    assert(OA.mapOrcidTypeToZotero('journal-article') === 'journalArticle', 'Maps journal-article to journalArticle');
+    assert(OA.mapOrcidTypeToZotero('journal-issue') === 'journalArticle', 'Maps journal-issue to journalArticle');
+    assert(OA.mapOrcidTypeToZotero('book') === 'book', 'Maps book to book');
+    assert(OA.mapOrcidTypeToZotero('edited-book') === 'book', 'Maps edited-book to book');
+    assert(OA.mapOrcidTypeToZotero('book-chapter') === 'bookSection', 'Maps book-chapter to bookSection');
+    assert(OA.mapOrcidTypeToZotero('conference-paper') === 'conferencePaper', 'Maps conference-paper to conferencePaper');
+    assert(OA.mapOrcidTypeToZotero('report') === 'report', 'Maps report to report');
+    assert(OA.mapOrcidTypeToZotero('dissertation') === 'thesis', 'Maps dissertation to thesis');
+    assert(OA.mapOrcidTypeToZotero('patent') === 'patent', 'Maps patent to patent');
+    assert(OA.mapOrcidTypeToZotero('preprint') === 'preprint', 'Maps preprint to preprint');
+    assert(OA.mapOrcidTypeToZotero('data-set') === 'dataset', 'Maps data-set to dataset');
+    assert(OA.mapOrcidTypeToZotero('unknown-unsupported-type') === 'journalArticle', 'Defaults to journalArticle for unknown work types');
+
+    assert(typeof OA.parseAuthorName === 'function', 'parseAuthorName function exists on plugin');
+    const a1 = OA.parseAuthorName('Carberry, Josiah');
+    assert(a1.lastName === 'Carberry' && a1.firstName === 'Josiah', 'Parses "Last, First" author format');
+    const a2 = OA.parseAuthorName('Josiah St. John Carberry');
+    assert(a2.lastName === 'Carberry' && a2.firstName === 'Josiah St. John', 'Parses multi-token "First Middle Last" author format');
+    const a3 = OA.parseAuthorName('CERN Collaboration');
+    assert(a3.lastName === 'CERN Collaboration' && a3.fieldMode === 1, 'Parses organizational team names with fieldMode=1');
+    const a4 = OA.parseAuthorName('UNESCO');
+    assert(a4.lastName === 'UNESCO' && a4.fieldMode === 1, 'Parses single institution name with fieldMode=1');
+    const a5 = OA.parseAuthorName('');
+    assert(a5.lastName === 'Unknown', 'Handles empty author string gracefully');
+
+    // ==========================================
+    // Test 11: Step 4 Zotero Item Creation & Field Assignment
+    // ==========================================
+    console.log('\n-- Step 4: Zotero Item Creation & Field Assignment --');
+    assert(typeof OA.createZoteroItem === 'function', 'createZoteroItem exists on plugin');
+
+    // Attach mock Zotero.Item constructor to sandbox
+    let mockSavedItems = [];
+    sandbox.Zotero.Item = function(type) {
+      this.itemType = type;
+      this.fields = {};
+      this.creators = [];
+      this.setField = function(f, v) { this.fields[f] = v; };
+      this.getField = function(f) { return this.fields[f]; };
+      this.setCreators = function(c) { this.creators = c; };
+      this.getCreators = function() { return this.creators; };
+      this.saveTx = async function() {
+        this.id = mockSavedItems.length + 100;
+        mockSavedItems.push(this);
+        return this.id;
+      };
+    };
+    sandbox.Zotero.ItemTypes = {
+      getID(type) { return type; }
+    };
+    sandbox.Zotero.Libraries = {
+      userLibraryID: 1,
+      getName(id) { return 'My Library'; }
+    };
+
+    const richWork = {
+      title: 'A Methodology for the Emulation of Architecture',
+      doi: 'https://doi.org/10.5555/12345680',
+      year: '2012',
+      journalTitle: 'Journal of Computer Science',
+      url: 'https://example.org/emulation-article',
+      orcid: '0000-0002-1825-0097',
+      putCode: '10987654',
+      type: 'journal-article',
+      authors: ['Carberry, Josiah', 'Lovelace, Ada']
+    };
+
+    const createdItem = await OA.createZoteroItem(richWork, 1);
+    assert(createdItem.itemType === 'journalArticle', 'Created item itemType is journalArticle');
+    assert(createdItem.getField('title') === 'A Methodology for the Emulation of Architecture', 'Item title set');
+    assert(createdItem.getField('DOI') === '10.5555/12345680', 'Item DOI set with normalized DOI (prefix stripped)');
+    assert(createdItem.getField('date') === '2012', 'Item publication year set to date field');
+    assert(createdItem.getField('publicationTitle') === 'Journal of Computer Science', 'Item journal title set');
+    assert(createdItem.getField('url') === 'https://example.org/emulation-article', 'Item URL set');
+    assert(createdItem.getField('extra').includes('ORCID: 0000-0002-1825-0097'), 'Extra field contains ORCID provenance');
+    assert(createdItem.getField('extra').includes('ORCID-Put-Code: 10987654'), 'Extra field contains put-code provenance');
+    assert(createdItem.getCreators().length === 2, 'Item creators assigned with 2 author records');
+    assert(createdItem.getCreators()[0].lastName === 'Carberry', 'Creator 1 lastName is Carberry');
+    assert(createdItem.getCreators()[1].lastName === 'Lovelace', 'Creator 2 lastName is Lovelace');
+
+    // Sparse work with missing fields
+    const sparseWork = {
+      title: null,
+      doi: null,
+      year: null,
+      type: null
+    };
+    const sparseItem = await OA.createZoteroItem(sparseWork, 1);
+    assert(sparseItem.getField('title') === '(Untitled ORCID Publication)', 'Handled missing title with fallback');
+    assert(sparseItem.getField('DOI') === undefined, 'Missing DOI not invented');
+    assert(sparseItem.getField('date') === undefined, 'Missing date not invented');
+
+    // ==========================================
+    // Test 12: Step 4 Import Execution & Duplicate Recheck Safeguards
+    // ==========================================
+    console.log('\n-- Step 4: Import Execution, Immediate Recheck & Intra-Batch Prevention --');
+    assert(typeof OA.importPublications === 'function', 'importPublications function exists on plugin');
+
+    // Pre-seed local library items
+    OA.mockLibraryItems = [
+      { id: 201, title: 'Already In Library Paper', doi: '10.1000/already-present', year: '2020', author: 'Smith' }
+    ];
+
+    const worksToImport = [
+      {
+        title: 'Already In Library Paper',
+        doi: '10.1000/already-present',
+        year: '2020',
+        author: 'Smith'
+      },
+      {
+        title: 'New Publication Alpha',
+        doi: '10.1000/alpha',
+        year: '2023',
+        author: 'Josiah Carberry'
+      },
+      {
+        title: 'New Publication Beta (Duplicate DOI of Alpha in same batch)',
+        doi: '10.1000/alpha', // Same DOI as Alpha in same batch
+        year: '2023',
+        author: 'Josiah Carberry'
+      },
+      {
+        title: 'New Publication Gamma',
+        doi: '10.1000/gamma',
+        year: '2024',
+        author: 'Ada Lovelace'
+      }
+    ];
+
+    const importRes = await OA.importPublications(worksToImport, 1);
+    assert(importRes.imported === 2, 'Imported exactly 2 distinct new publications (Alpha and Gamma)');
+    assert(importRes.skipped === 2, 'Skipped 2 duplicate publications (1 pre-existing, 1 intra-batch duplicate DOI)');
+    assert(importRes.failed === 0, 'Zero failed items in clean batch');
+    assert(importRes.importedItems.length === 2, 'Result contains 2 saved Zotero item objects');
+
+    // Verify intra-batch duplicate did not produce a second save
+    const alphaSaves = mockSavedItems.filter(i => i.getField('DOI') === '10.1000/alpha');
+    assert(alphaSaves.length === 1, 'Only one item saved for DOI 10.1000/alpha (intra-batch duplicate safely skipped)');
+
+    // ==========================================
+    // Test 13: Step 4 Partial Failure Handling & Error Separation
+    // ==========================================
+    console.log('\n-- Step 4: Partial Failure Handling & Error Separation --');
+    const originalCreateZoteroItem = OA.createZoteroItem.bind(OA);
+    OA.createZoteroItem = async (work, targetLibraryID) => {
+      if (work.title === 'Corrupted Record Will Fail') {
+        const item = await originalCreateZoteroItem(work, targetLibraryID);
+        item.saveTx = async () => {
+          throw new Error('Simulated database lock error');
+        };
+        return item;
+      }
+      return originalCreateZoteroItem(work, targetLibraryID);
+    };
+
+    OA.mockLibraryItems = [];
+    const mixedBatch = [
+      { title: 'Good Publication 1', doi: '10.1000/good-1', year: '2023' },
+      { title: 'Corrupted Record Will Fail', doi: '10.1000/fail', year: '2023' },
+      { title: 'Good Publication 2', doi: '10.1000/good-2', year: '2023' }
+    ];
+
+    const mixedRes = await OA.importPublications(mixedBatch, 1);
+    assert(mixedRes.imported === 2, 'Partial batch imported 2 good publications');
+    assert(mixedRes.failed === 1, 'Partial batch recorded 1 failure');
+    assert(mixedRes.errors.length === 1, 'Errors array contains 1 error entry');
+    assert(mixedRes.errors[0].title === 'Corrupted Record Will Fail', 'Error entry identifies failing publication');
+    assert(mixedRes.errors[0].error.includes('database lock'), 'Error entry contains failure message');
+    assert(mixedRes.success === false, 'Result success is false when any item fails');
+
+    // Restore original createZoteroItem
+    OA.createZoteroItem = originalCreateZoteroItem;
+
+    // Empty batch handling
+    const emptyRes = await OA.importPublications([], 1);
+    assert(emptyRes.imported === 0 && emptyRes.skipped === 0 && emptyRes.failed === 0, 'Empty batch handled gracefully');
+
+    // ==========================================
+    // Test 14: Step 4 Confirmation Dialogs & Cancellation Safeguards
+    // ==========================================
+    console.log('\n-- Step 4: Confirmation Dialogs & Cancellation Safeguards --');
+    assert(typeof OA.confirmPossibleDuplicates === 'function', 'confirmPossibleDuplicates exists on plugin');
+    assert(typeof OA.confirmImport === 'function', 'confirmImport exists on plugin');
+
+    let confirmCallsLog = [];
+    sandbox.Services.prompt.confirm = (win, title, msg) => {
+      confirmCallsLog.push({ title, msg });
+      return false; // User cancels
+    };
+
+    // 14a: Cancel possible duplicates confirmation
+    const cancelledPossibleDups = OA.confirmPossibleDuplicates(mockWindow, [
+      { title: 'Test Possible Dup', year: '2021', matchReason: 'Title matches local item' }
+    ]);
+    assert(cancelledPossibleDups === false, 'User cancelling Possible Duplicates confirmation returns false');
+    assert(confirmCallsLog.length === 1, 'Possible duplicates confirmation dialog was shown');
+    assert(confirmCallsLog[0].title.includes('Possible Duplicates'), 'Dialog title reflects Possible Duplicates warning');
+    assert(confirmCallsLog[0].msg.includes('CAUTION'), 'Dialog message emphasizes caution');
+
+    // 14b: Cancel final import confirmation
+    confirmCallsLog = [];
+    const cancelledFinal = OA.confirmImport(mockWindow, [
+      { title: 'Work 1', duplicateStatus: 'New' },
+      { title: 'Work 2', duplicateStatus: 'Possible Duplicate' }
+    ], 1);
+    assert(cancelledFinal === false, 'User cancelling final import confirmation returns false');
+    assert(confirmCallsLog.length === 1, 'Final import confirmation dialog was shown');
+    assert(confirmCallsLog[0].title.includes('Confirm Import'), 'Final confirmation title is Confirm Import');
+    assert(confirmCallsLog[0].msg.includes('Destination: My Library'), 'Final confirmation specifies target library name');
+    assert(confirmCallsLog[0].msg.includes('New records: 1'), 'Final confirmation shows new records count');
+    assert(confirmCallsLog[0].msg.includes('Possible duplicates: 1'), 'Final confirmation shows possible duplicates count');
+
+    // 14c: User accepts confirmation
+    sandbox.Services.prompt.confirm = () => true;
+    const acceptedFinal = OA.confirmImport(mockWindow, [{ title: 'Work 1', duplicateStatus: 'New' }], 1);
+    assert(acceptedFinal === true, 'User accepting final import returns true');
+
+    // ==========================================
+    // Test 15: Step 4 Interactive Selection UI (DOM Modal)
+    // ==========================================
+    console.log('\n-- Step 4: Interactive Selection UI (DOM Modal) Tests --');
+    assert(typeof OA.showImportModal === 'function', 'showImportModal exists on plugin');
+
+    function createMockElement(tag, docRef) {
+      let _id = null;
+      const el = {
+        tagName: tag,
+        get id() { return _id; },
+        set id(val) {
+          _id = val;
+          if (val && docRef) docRef.elementsById.set(val, el);
+        },
+        className: '',
+        style: {},
+        children: [],
+        listeners: {},
+        checked: false,
+        disabled: false,
+        textContent: '',
+        innerHTML: '',
+        type: tag === 'input' ? 'checkbox' : undefined,
+        appendChild(child) {
+          this.children.push(child);
+          child.parent = this;
+          if (child.id && docRef) docRef.elementsById.set(child.id, child);
+          return child;
+        },
+        addEventListener(event, fn) {
+          this.listeners[event] = fn;
+        },
+        remove() {
+          if (_id && docRef) docRef.elementsById.delete(_id);
+          if (this.parent) {
+            const idx = this.parent.children.indexOf(this);
+            if (idx !== -1) this.parent.children.splice(idx, 1);
+          }
+        }
+      };
+      return el;
+    }
+
+    const docElementsById = new Map();
+    const domDoc = {
+      elementsById: docElementsById,
+      body: null,
+      getElementById(id) {
+        return this.elementsById.get(id) || null;
+      },
+      createElement(tag) {
+        return createMockElement(tag, this);
+      }
+    };
+    domDoc.body = createMockElement('body', domDoc);
+    const domModalWindow = { document: domDoc };
+
+    const modalData = {
+      orcid: '0000-0002-1825-0097',
+      works: [
+        { title: 'Work Alpha', duplicateStatus: 'New', year: '2023', doi: '10.1/a' },
+        { title: 'Work Beta', duplicateStatus: 'Already in Zotero', year: '2020', doi: '10.1/b' },
+        { title: 'Work Gamma', duplicateStatus: 'Possible Duplicate', year: '2021', doi: '10.1/c' }
+      ]
+    };
+
+    OA.showImportModal(domModalWindow, modalData);
+
+    const overlayEl = domModalWindow.document.getElementById('orcid-assistant-modal-overlay');
+    assert(overlayEl !== null, 'showImportModal rendered modal overlay in DOM');
+    assert(modalData.works[0].selected === true, 'New record selected by default');
+    assert(modalData.works[1].selected === false, '"Already in Zotero" record unselected by default');
+    assert(modalData.works[2].selected === false, '"Possible Duplicate" record unselected by default');
+
+    const summaryEl = domModalWindow.document.getElementById('orcid-selection-summary');
+    assert(summaryEl !== null, 'Selection summary element present');
+    assert(summaryEl.textContent === '1 of 3 selected', 'Selection summary reports initial count (1 of 3 selected)');
+
+    // Test removeFromWindow cleans up active modal
+    OA.removeFromWindow(domModalWindow);
+    assert(domModalWindow.document.getElementById('orcid-assistant-modal-overlay') === null, 'removeFromWindow removes active modal overlay from window');
+
+    // ==========================================
+    // Test 16: Strict ORCID Read-Only & Zero Write API Verification
+    // ==========================================
+    console.log('\n-- Step 4: Strict ORCID Read-Only & Zero Write Scope Verification --');
+    const serverJs = fs.readFileSync(path.join(__dirname, '..', 'helper-service', 'server.js'), 'utf8');
+    const clientJs = fs.readFileSync(path.join(__dirname, '..', 'helper-service', 'orcid-client.js'), 'utf8');
+    assert(!serverJs.includes('/activities/update') && !clientJs.includes('/activities/update'), 'SECURITY: Helper service does NOT contain ORCID write scope /activities/update');
+    assert(!serverJs.includes('/read-limited') && !clientJs.includes('/read-limited'), 'SECURITY: Helper service does NOT request Member-only /read-limited');
+    assert(clientJs.includes('/read-public'), 'SECURITY: Helper service requests strictly /read-public scope');
+    assert(!clientJs.includes("method: 'PUT'") && !clientJs.includes("method: 'DELETE'"), 'SECURITY: Helper service does NOT issue PUT or DELETE requests');
+    assert(clientJs.includes("method: 'GET'"), 'SECURITY: Works endpoint accessed strictly via GET');
+
+    const pluginJs = fs.readFileSync(path.join(SRC_DIR, 'orcid-assistant.js'), 'utf8');
+    assert(!pluginJs.includes('method: "POST"'), 'SECURITY: Plugin does NOT issue POST requests');
+    assert(!pluginJs.includes('method: "PUT"'), 'SECURITY: Plugin does NOT issue PUT requests');
+    assert(!pluginJs.includes('method: "DELETE"'), 'SECURITY: Plugin does NOT issue DELETE requests');
+
+    // ==========================================
+    // Test 17: Preserved Step 1 Dialog & Shutdown Cleanup
+    // ==========================================
+    console.log('\n-- Preservation & Lifecycle Shutdown Cleanup --');
     assert(typeof OA.showRunningDialog === 'function', 'showRunningDialog preserved from Step 1');
 
     // Test shutdown cleanup
@@ -600,9 +922,9 @@ try {
     assert(sandbox.ORCIDAssistant === undefined, 'ORCIDAssistant singleton is unset on shutdown');
 
     // ==========================================
-    // Test 11: Verify XPI Archive Content & Isolation
+    // Test 18: Verify XPI Archive Content & Isolation
     // ==========================================
-    console.log('\n-- Step 3: XPI Archive Security & Content Isolation --');
+    console.log('\n-- XPI Archive Security & Content Isolation --');
     if (fs.existsSync(XPI_PATH)) {
       const zip = new AdmZip(XPI_PATH);
       const entries = zip.getEntries().map(e => e.entryName);
