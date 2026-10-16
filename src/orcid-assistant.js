@@ -532,9 +532,29 @@ var ORCIDAssistant = {
       });
 
       return regularItems.map(item => {
-        const title = (typeof item.getField === "function") ? item.getField("title") : (item.title || "");
-        const doi = (typeof item.getField === "function") ? (item.getField("DOI") || item.getField("doi")) : (item.DOI || item.doi || "");
-        const dateVal = (typeof item.getField === "function") ? (item.getField("date") || item.getField("year")) : (item.date || item.year || "");
+        let title = "";
+        try {
+          if (typeof item.getField === "function") {
+            title = item.getField("title") || "";
+          }
+        } catch (e) {}
+        if (!title) title = item.title || "";
+
+        let doi = "";
+        try {
+          if (typeof item.getField === "function") {
+            doi = item.getField("DOI") || "";
+          }
+        } catch (e) {}
+        if (!doi) doi = item.DOI || item.doi || "";
+
+        let dateVal = "";
+        try {
+          if (typeof item.getField === "function") {
+            dateVal = item.getField("date") || "";
+          }
+        } catch (e) {}
+        if (!dateVal) dateVal = item.date || item.year || "";
         let authors = [];
         if (typeof item.getCreators === "function") {
           const creators = item.getCreators() || [];
@@ -627,13 +647,13 @@ var ORCIDAssistant = {
               continue;
             }
             const authorDetail = typeof authorMatch === "string"
-              ? ` & author (${authorMatch})`
+              ? ` and author (${authorMatch})`
               : "";
             return {
               ...work,
               duplicateStatus: "Possible Duplicate",
               matchType: "TITLE_YEAR",
-              matchReason: `Title & year (${workYear})${authorDetail} match local item`,
+              matchReason: `Title and year (${workYear})${authorDetail} match local item`,
               matchedItem: {
                 id: item.id,
                 key: item.key,
@@ -651,7 +671,7 @@ var ORCIDAssistant = {
               ...work,
               duplicateStatus: "Possible Duplicate",
               matchType: "TITLE_AUTHOR",
-              matchReason: `Title & author (${authorMatch}) match local item (year unavailable)`,
+              matchReason: `Title and author (${authorMatch}) match local item (year unavailable)`,
               matchedItem: {
                 id: item.id,
                 key: item.key,
@@ -961,6 +981,7 @@ var ORCIDAssistant = {
       if (authorInput.fieldMode === 1 || authorInput.name) {
         const orgName = (authorInput.name || authorInput.lastName || authorInput.fullName || "").trim();
         return {
+          firstName: "",
           lastName: orgName || "Unknown Organization",
           fieldMode: 1,
           creatorType
@@ -1017,6 +1038,7 @@ var ORCIDAssistant = {
     const spaceParts = trimmed.split(/\s+/);
     if (spaceParts.length === 1 || orgPattern.test(trimmed)) {
       return {
+        firstName: "",
         lastName: trimmed,
         fieldMode: 1,
         creatorType: "author"
@@ -1040,6 +1062,12 @@ var ORCIDAssistant = {
     if (!strVal) return false;
 
     try {
+      if (typeof Zotero !== "undefined" && Zotero.ItemFields && typeof Zotero.ItemFields.isValidForType === "function" && item.itemTypeID) {
+        const fieldID = (typeof Zotero.ItemFields.getID === "function") ? Zotero.ItemFields.getID(field) : null;
+        if (fieldID && !Zotero.ItemFields.isValidForType(fieldID, item.itemTypeID)) {
+          return false;
+        }
+      }
       if (typeof item.isValidField === "function") {
         if (!item.isValidField(field)) return false;
       }
@@ -1111,12 +1139,16 @@ var ORCIDAssistant = {
     let item;
     if (typeof Zotero !== "undefined" && typeof Zotero.Item === "function") {
       try {
-        let typeID = (Zotero.ItemTypes && typeof Zotero.ItemTypes.getID === "function")
-          ? Zotero.ItemTypes.getID(zoteroType)
-          : zoteroType;
-        item = new Zotero.Item(typeID || "journalArticle");
+        item = new Zotero.Item(zoteroType);
       } catch (e) {
-        item = new Zotero.Item("journalArticle");
+        try {
+          let typeID = (Zotero.ItemTypes && typeof Zotero.ItemTypes.getID === "function")
+            ? Zotero.ItemTypes.getID(zoteroType)
+            : null;
+          item = new Zotero.Item(typeID || "journalArticle");
+        } catch (e2) {
+          item = new Zotero.Item("journalArticle");
+        }
       }
     } else if (typeof Zotero !== "undefined" && Zotero.Items && typeof Zotero.Items.new === "function") {
       item = await Zotero.Items.new(zoteroType);
@@ -1487,12 +1519,19 @@ var ORCIDAssistant = {
     // Header
     const header = doc.createElement("div");
     header.style.cssText = "padding:16px 20px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;background:#f8fafc;";
-    header.innerHTML = `
-      <div>
-        <h3 style="margin:0;font-size:1.15rem;font-weight:700;color:#0f172a;">ORCID Assistant — Public Works Import</h3>
-        <p style="margin:4px 0 0 0;font-size:0.85rem;color:#64748b;">ORCID iD: <strong>${orcid}</strong> • ${totalCount} Public Works Found</p>
-      </div>
-    `;
+
+    const headerTextContainer = doc.createElement("div");
+    const headerTitle = doc.createElement("h3");
+    headerTitle.style.cssText = "margin:0;font-size:1.15rem;font-weight:700;color:#0f172a;";
+    headerTitle.textContent = "ORCID Assistant — Public Works Import";
+
+    const headerSub = doc.createElement("p");
+    headerSub.style.cssText = "margin:4px 0 0 0;font-size:0.85rem;color:#64748b;";
+    headerSub.textContent = `ORCID iD: ${orcid} • ${totalCount} Public Works Found`;
+
+    headerTextContainer.appendChild(headerTitle);
+    headerTextContainer.appendChild(headerSub);
+    header.appendChild(headerTextContainer);
 
     const closeBtn = doc.createElement("button");
     closeBtn.textContent = "×";
@@ -1508,11 +1547,17 @@ var ORCIDAssistant = {
 
     const badgesContainer = doc.createElement("div");
     badgesContainer.style.cssText = "display:flex;gap:6px;align-items:center;";
-    badgesContainer.innerHTML = `
-      <span style="font-size:0.75rem;font-weight:600;padding:3px 8px;border-radius:9999px;background:#e2e8f0;color:#475569;">Already in Zotero: ${stats.alreadyCount}</span>
-      <span style="font-size:0.75rem;font-weight:600;padding:3px 8px;border-radius:9999px;background:#fef3c7;color:#92400e;">Possible Duplicate: ${stats.possibleCount}</span>
-      <span style="font-size:0.75rem;font-weight:600;padding:3px 8px;border-radius:9999px;background:#dcfce7;color:#166534;">New: ${stats.newCount}</span>
-    `;
+
+    const makeBadge = (text, bg, color) => {
+      const b = doc.createElement("span");
+      b.style.cssText = `font-size:0.75rem;font-weight:600;padding:3px 8px;border-radius:9999px;background:${bg};color:${color};`;
+      b.textContent = text;
+      return b;
+    };
+
+    badgesContainer.appendChild(makeBadge(`Already in Zotero: ${stats.alreadyCount}`, "#e2e8f0", "#475569"));
+    badgesContainer.appendChild(makeBadge(`Possible Duplicate: ${stats.possibleCount}`, "#fef3c7", "#92400e"));
+    badgesContainer.appendChild(makeBadge(`New: ${stats.newCount}`, "#dcfce7", "#166534"));
 
     const actionsContainer = doc.createElement("div");
     actionsContainer.style.cssText = "display:flex;gap:8px;align-items:center;";
@@ -1594,41 +1639,96 @@ var ORCIDAssistant = {
 
       // Bibliographic detail line
       const bibDetails = [];
-      if (w.journalTitle) bibDetails.push(`<em>${w.journalTitle}</em>`);
+      if (w.journalTitle) bibDetails.push(w.journalTitle);
       if (w.volume) bibDetails.push(`Vol. ${w.volume}`);
       if (w.issue) bibDetails.push(`No. ${w.issue}`);
       if (w.pages || w.page) bibDetails.push(`pp. ${w.pages || w.page}`);
-      const bibLine = bibDetails.length > 0 ? `<div style="font-size:0.82rem;color:#334155;margin-bottom:4px;">${bibDetails.join(" • ")}</div>` : "";
 
-      // Quality pill row
-      let qualityInfo = "";
-      if (quality.enrichedFields && quality.enrichedFields.length > 0) {
-        qualityInfo += `<span style="font-size:0.72rem;background:#ecfdf5;color:#065f46;padding:1px 6px;border-radius:4px;font-weight:500;">✨ Enriched (${quality.enrichedFields.join(", ")})</span> `;
-      }
-      if (quality.missingFields && quality.missingFields.length > 0) {
-        const topMissing = quality.missingFields.slice(0, 3).join(", ");
-        qualityInfo += `<span style="font-size:0.72rem;background:#fef2f2;color:#991b1b;padding:1px 6px;border-radius:4px;font-weight:500;">Missing: ${topMissing}</span>`;
+      // 1. Top row: Title + badges
+      const topRow = doc.createElement("div");
+      topRow.style.cssText = "display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;";
+
+      const titleEl = doc.createElement("div");
+      titleEl.style.cssText = "font-weight:600;font-size:0.95rem;color:#0f172a;line-height:1.35;";
+      titleEl.textContent = w.title || "(Untitled Publication)";
+      topRow.appendChild(titleEl);
+
+      const badgesDiv = doc.createElement("div");
+      badgesDiv.style.cssText = "display:flex;gap:4px;align-items:center;flex-shrink:0;";
+
+      const sourceBadge = doc.createElement("span");
+      sourceBadge.style.cssText = `font-size:0.72rem;font-weight:600;padding:2px 7px;border-radius:9999px;background:${sourceBadgeBg};color:${sourceBadgeColor};white-space:nowrap;`;
+      sourceBadge.textContent = quality.sourceSummary || "ORCID";
+      badgesDiv.appendChild(sourceBadge);
+
+      const dupBadge = doc.createElement("span");
+      dupBadge.style.cssText = `font-size:0.72rem;font-weight:600;padding:2px 7px;border-radius:9999px;background:${pillBg};color:${pillColor};white-space:nowrap;`;
+      dupBadge.textContent = w.duplicateStatus || "New";
+      badgesDiv.appendChild(dupBadge);
+
+      topRow.appendChild(badgesDiv);
+      contentCol.appendChild(topRow);
+
+      // 2. Authors line
+      const authorsEl = doc.createElement("div");
+      authorsEl.style.cssText = "font-size:0.85rem;color:#475569;margin-bottom:4px;";
+      authorsEl.textContent = authorsText;
+      contentCol.appendChild(authorsEl);
+
+      // 3. Bibliographic details (journal, volume, issue, pages)
+      if (bibDetails.length > 0) {
+        const bibEl = doc.createElement("div");
+        bibEl.style.cssText = "font-size:0.82rem;color:#334155;margin-bottom:4px;font-style:italic;";
+        bibEl.textContent = bibDetails.join(" • ");
+        contentCol.appendChild(bibEl);
       }
 
-      contentCol.innerHTML = `
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:4px;">
-          <div style="font-weight:600;font-size:0.95rem;color:#0f172a;line-height:1.35;">${w.title || "(Untitled Publication)"}</div>
-          <div style="display:flex;gap:4px;align-items:center;flex-shrink:0;">
-            <span style="font-size:0.72rem;font-weight:600;padding:2px 7px;border-radius:9999px;background:${sourceBadgeBg};color:${sourceBadgeColor};white-space:nowrap;">${quality.sourceSummary}</span>
-            <span style="font-size:0.72rem;font-weight:600;padding:2px 7px;border-radius:9999px;background:${pillBg};color:${pillColor};white-space:nowrap;">${w.duplicateStatus}</span>
-          </div>
-        </div>
-        <div style="font-size:0.85rem;color:#475569;margin-bottom:4px;">${authorsText}</div>
-        ${bibLine}
-        <div style="font-size:0.78rem;color:#64748b;display:flex;flex-wrap:wrap;gap:12px;margin-bottom:4px;">
-          <span><strong>Year:</strong> ${w.year || "N/A"}</span>
-          <span><strong>DOI:</strong> ${w.doi || "None"}</span>
-          <span><strong>Type:</strong> ${w.type || "work"}</span>
-          ${w.issn ? `<span><strong>ISSN:</strong> ${w.issn}</span>` : ""}
-        </div>
-        ${qualityInfo ? `<div style="margin-top:4px;">${qualityInfo}</div>` : ""}
-        ${w.matchReason && w.duplicateStatus !== "New" ? `<div style="margin-top:4px;font-size:0.78rem;font-style:italic;color:#b45309;">${w.matchReason}</div>` : ""}
-      `;
+      // 4. Metadata details (Year, DOI, Type, ISSN)
+      const metaRow = doc.createElement("div");
+      metaRow.style.cssText = "font-size:0.78rem;color:#64748b;display:flex;flex-wrap:wrap;gap:12px;margin-bottom:4px;";
+
+      const addMetaItem = (label, val) => {
+        const span = doc.createElement("span");
+        span.textContent = `${label}: ${val}`;
+        metaRow.appendChild(span);
+      };
+
+      addMetaItem("Year", w.year || "N/A");
+      addMetaItem("DOI", w.doi || "None");
+      addMetaItem("Type", w.type || "work");
+      if (w.issn) addMetaItem("ISSN", w.issn);
+      contentCol.appendChild(metaRow);
+
+      // 5. Quality indicators (Enriched / Missing)
+      if ((quality.enrichedFields && quality.enrichedFields.length > 0) || (quality.missingFields && quality.missingFields.length > 0)) {
+        const qualityRow = doc.createElement("div");
+        qualityRow.style.cssText = "margin-top:4px;display:flex;flex-wrap:wrap;gap:6px;";
+
+        if (quality.enrichedFields && quality.enrichedFields.length > 0) {
+          const enrichedPill = doc.createElement("span");
+          enrichedPill.style.cssText = "font-size:0.72rem;background:#ecfdf5;color:#065f46;padding:1px 6px;border-radius:4px;font-weight:500;";
+          enrichedPill.textContent = `Enriched (${quality.enrichedFields.join(", ")})`;
+          qualityRow.appendChild(enrichedPill);
+        }
+
+        if (quality.missingFields && quality.missingFields.length > 0) {
+          const topMissing = quality.missingFields.slice(0, 3).join(", ");
+          const missingPill = doc.createElement("span");
+          missingPill.style.cssText = "font-size:0.72rem;background:#fef2f2;color:#991b1b;padding:1px 6px;border-radius:4px;font-weight:500;";
+          missingPill.textContent = `Missing: ${topMissing}`;
+          qualityRow.appendChild(missingPill);
+        }
+
+        contentCol.appendChild(qualityRow);
+      }
+
+      // 6. Match reason (for duplicates)
+      if (w.matchReason && w.duplicateStatus !== "New") {
+        const matchEl = doc.createElement("div");
+        matchEl.style.cssText = "margin-top:4px;font-size:0.78rem;font-style:italic;color:#b45309;";
+        matchEl.textContent = w.matchReason;
+        contentCol.appendChild(matchEl);
+      }
 
       card.appendChild(cbCol);
       card.appendChild(contentCol);
@@ -1752,15 +1852,20 @@ var ORCIDAssistant = {
           Services.prompt.alert(window, "ORCID Assistant - Import Summary", summaryMsg);
         }
 
-        // 5. Refresh modal statuses and duplicate detection
-        const updatedLocalItems = await this.getLocalLibraryItems(targetLibraryID);
-        const refreshedWorks = this.detectDuplicates(works, updatedLocalItems);
-        result.works = refreshedWorks;
-        result.duplicateStats = this.computeDuplicateStats(refreshedWorks);
+        // 5. Refresh modal statuses and duplicate detection safely
+        try {
+          const updatedLocalItems = await this.getLocalLibraryItems(targetLibraryID);
+          const refreshedWorks = this.detectDuplicates(works, updatedLocalItems);
+          result.works = refreshedWorks;
+          result.duplicateStats = this.computeDuplicateStats(refreshedWorks);
 
-        // Close and reopen refreshed modal
-        overlay.remove();
-        this.showImportModal(window, result);
+          // Close and reopen refreshed modal
+          overlay.remove();
+          this.showImportModal(window, result);
+        } catch (refreshErr) {
+          this.logError(`Modal refresh notice (import succeeded): ${refreshErr.message}`);
+          overlay.remove();
+        }
       } catch (err) {
         this.logError(err);
         btnImport.disabled = false;

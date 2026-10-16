@@ -1043,6 +1043,61 @@ try {
     OA.removeFromWindow(domModalWindow);
     assert(domModalWindow.document.getElementById('orcid-assistant-modal-overlay') === null, 'removeFromWindow removes active modal overlay from window');
 
+    // Test showImportModal with special characters (ampersands, angles, quotes)
+    const specialCharsData = {
+      orcid: '0000-0002-1825-0097',
+      totalWorks: 2,
+      works: [
+        {
+          title: 'Research & Development in Computer Science: A < B & C > D',
+          authors: ['Smith & Jones', 'AT&T Labs'],
+          journalTitle: 'Journal of Physics A & B: Mathematical & Theoretical',
+          duplicateStatus: 'Already in Zotero',
+          matchReason: 'Title and year (2020) and author (smith) match local item',
+          year: '2020',
+          doi: '10.1000/182?a=1&b=2'
+        },
+        {
+          title: 'Clean Publication',
+          authors: ['Doe, John'],
+          duplicateStatus: 'New',
+          year: '2022',
+          doi: '10.1000/clean'
+        }
+      ]
+    };
+    OA.showImportModal(domModalWindow, specialCharsData);
+    assert(domModalWindow.document.getElementById('orcid-assistant-modal-overlay') !== null, 'showImportModal handles & and < > special characters safely without DOMException');
+    OA.removeFromWindow(domModalWindow);
+
+    // Test safe library item field reader when item.getField throws on invalid field names
+    const mockZoteroItemWithStrictFields = {
+      isRegularItem: () => true,
+      title: 'Existing Local Book',
+      DOI: '10.1234/test',
+      date: '2021',
+      getField(field) {
+        if (field === 'DOI') return this.DOI;
+        if (field === 'title') return this.title;
+        if (field === 'date') return this.date;
+        throw new Error('An invalid or illegal string was specified');
+      },
+      getCreators: () => [{ lastName: 'Smith' }]
+    };
+    const prevZotero = sandbox.Zotero;
+    sandbox.Zotero = {
+      Items: {
+        getAll: async () => [mockZoteroItemWithStrictFields]
+      },
+      Libraries: { userLibraryID: 1 }
+    };
+    OA.mockLibraryItems = null; // Use live Zotero.Items.getAll path
+    const readItems = await OA.getLocalLibraryItems(1);
+    sandbox.Zotero = prevZotero; // Restore original sandbox Zotero
+    assert(readItems.length === 1, 'getLocalLibraryItems handles strict getField without throwing syntax error');
+    assert(readItems[0].doi === '10.1234/test', 'Correctly read DOI');
+    assert(readItems[0].year === '2021', 'Correctly read date without calling invalid field names');
+
     // ==========================================
     // Test 16: Strict ORCID Read-Only & Zero Write API Verification
     // ==========================================
