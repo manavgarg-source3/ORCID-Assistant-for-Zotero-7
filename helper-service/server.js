@@ -146,6 +146,9 @@ const server = http.createServer(async (req, res) => {
 
       return sendJson(res, 200, {
         success: true,
+        orcid: result.orcid,
+        totalWorks: result.totalWorks,
+        works: result.works,
         data: result
       });
     } catch (err) {
@@ -193,3 +196,4 @@ module.exports = {
   orcidClient,
   loadEnv
 };
+

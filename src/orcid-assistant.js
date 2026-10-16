@@ -382,9 +382,10 @@ var ORCIDAssistant = {
    * Format fetched works into a clean, read-only preview text.
    */
   formatWorksPreview(data) {
-    const orcid = data.orcid || "N/A";
-    const total = data.totalWorks || 0;
-    const works = Array.isArray(data.works) ? data.works : [];
+    const payload = data?.data || data || {};
+    const orcid = payload.orcid || data?.orcid || "N/A";
+    const total = payload.totalWorks ?? data?.totalWorks ?? (payload.works?.length || 0);
+    const works = Array.isArray(payload.works) ? payload.works : (Array.isArray(data?.works) ? data.works : []);
 
     let lines = [];
     lines.push("==================================================");
@@ -513,10 +514,11 @@ var ORCIDAssistant = {
 
       // Success: Display read-only preview
       const previewText = this.formatWorksPreview(result);
+      const totalCount = result.totalWorks ?? result.data?.totalWorks ?? 0;
       if (typeof promptService.alert === "function") {
         promptService.alert(
           window || null,
-          `ORCID Public Works Preview (${result.totalWorks} works found)`,
+          `ORCID Public Works Preview (${totalCount} works found)`,
           previewText
         );
       }

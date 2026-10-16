@@ -277,3 +277,4 @@ module.exports = {
   validateAndNormalizeOrcid,
   OrcidClient
 };
+
