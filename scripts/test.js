@@ -174,6 +174,13 @@ try {
     assert(menuItem.getAttribute('label') === 'ORCID Assistant', 'Menu item has label "ORCID Assistant"');
     assert(menuItem.getAttribute('data-l10n-id') === 'orcid-assistant-menu-item', 'Menu item has Fluent l10n-id');
 
+    // Verify batch menu item was added to toolsPopup
+    const batchMenuItem = mockWindow.document.getElementById('orcid-assistant-tools-batch-menuitem');
+    assert(batchMenuItem !== null, 'Batch menu item was registered in Tools popup on startup');
+    assert(batchMenuItem.getAttribute('label') === 'ORCID Assistant — Batch CSV Import...', 'Batch menu item has correct label');
+    assert(batchMenuItem.getAttribute('data-l10n-id') === 'orcid-assistant-menu-batch-item', 'Batch menu item has Fluent l10n-id');
+    assert(typeof batchMenuItem.listeners['command'] === 'function', 'Batch menu item has command event listener');
+
     // Trigger command listener (fallback when prompt API not configured in sandbox)
     assert(typeof menuItem.listeners['command'] === 'function', 'Menu item has command event listener');
     menuItem.listeners['command']({ target: menuItem });
@@ -646,10 +653,14 @@ try {
       this.itemType = type;
       this.fields = {};
       this.creators = [];
+      this.collections = [];
       this.setField = function(f, v) { this.fields[f] = v; };
       this.getField = function(f) { return this.fields[f]; };
       this.setCreators = function(c) { this.creators = c; };
       this.getCreators = function() { return this.creators; };
+      this.addToCollection = function(cid) { if (!this.collections.includes(cid)) this.collections.push(cid); };
+      this.setCollections = function(cids) { this.collections = Array.from(cids); };
+      this.getCollections = function() { return this.collections; };
       this.isValidField = function(f) { return true; };
       this.saveTx = async function() {
         this.id = mockSavedItems.length + 100;
@@ -983,6 +994,17 @@ try {
         disabled: false,
         textContent: '',
         innerHTML: '',
+        value: '',
+        files: [],
+        get firstChild() { return this.children[0] || null; },
+        removeChild(child) {
+          const idx = this.children.indexOf(child);
+          if (idx !== -1) {
+            this.children.splice(idx, 1);
+            if (child.id && docRef) docRef.elementsById.delete(child.id);
+          }
+          return child;
+        },
         type: tag === 'input' ? 'checkbox' : undefined,
         appendChild(child) {
           this.children.push(child);
@@ -1099,6 +1121,228 @@ try {
     assert(readItems[0].year === '2021', 'Correctly read date without calling invalid field names');
 
     // ==========================================
+    // Test 16: Batch CSV Parsing & Profile Extraction
+    // ==========================================
+    console.log('\n-- Batch CSV Parsing & Extraction Tests --');
+    assert(typeof OA.parseOrcidsFromCsvOrText === 'function', 'parseOrcidsFromCsvOrText exists on plugin');
+
+    // 16a: Standard CSV with header
+    const csvStandard = `Name,Department,ORCID
+Dr. Alice Smith,Physics,0000-0002-1825-0097
+Dr. Bob Jones,Computer Science,0000-0002-1694-233X`;
+    const resCsv1 = OA.parseOrcidsFromCsvOrText(csvStandard);
+    assert(resCsv1.totalFound === 2, 'Parsed 2 profiles from standard CSV');
+    assert(resCsv1.profiles[0].orcid === '0000-0002-1825-0097' && resCsv1.profiles[0].name === 'Dr. Alice Smith', 'Profile 1 extracted name and ORCID');
+    assert(resCsv1.profiles[1].orcid === '0000-0002-1694-233X' && resCsv1.profiles[1].name === 'Dr. Bob Jones', 'Profile 2 extracted name and ORCID');
+
+    // 16b: TSV format
+    const tsvText = "Researcher\tORCID\nProf. Raman\t0000-0002-1825-0097\nDr. Curie\thttps://orcid.org/0000-0002-1694-233X";
+    const resTsv = OA.parseOrcidsFromCsvOrText(tsvText);
+    assert(resTsv.totalFound === 2, 'Parsed 2 profiles from TSV text');
+    assert(resTsv.profiles[1].orcid === '0000-0002-1694-233X' && resTsv.profiles[1].name === 'Dr. Curie', 'Extracted name and normalized https prefix in TSV');
+
+    // 16c: Semicolon delimiter
+    const semiText = "Name;ORCID\nAlice;0000-0002-1825-0097\nBob;0000-0002-1694-233X";
+    const resSemi = OA.parseOrcidsFromCsvOrText(semiText);
+    assert(resSemi.totalFound === 2, 'Parsed 2 profiles from semicolon CSV');
+
+    // 16d: Plain unformatted ORCID list
+    const plainList = `0000-0002-1825-0097
+https://orcid.org/0000-0002-1694-233X`;
+    const resPlain = OA.parseOrcidsFromCsvOrText(plainList);
+    assert(resPlain.totalFound === 2, 'Parsed plain ORCID list without headers');
+
+    // 16e: Deduplication in file
+    const dupCsv = `Name,ORCID
+Alice,0000-0002-1825-0097
+Alice Duplicate,0000-0002-1825-0097
+Bob,0000-0002-1694-233X`;
+    const resDup = OA.parseOrcidsFromCsvOrText(dupCsv);
+    assert(resDup.totalFound === 2, 'Deduplicated repeated ORCID in file');
+    assert(resDup.duplicatesInFile === 1, 'Reported 1 duplicate in file');
+
+    // 16f: Invalid entries handling
+    const invalidCsv = `Name,ORCID
+Valid,0000-0002-1825-0097
+BadChecksum,0000-0002-1825-0000
+Malformed,12345`;
+    const resInvalid = OA.parseOrcidsFromCsvOrText(invalidCsv);
+    assert(resInvalid.totalFound === 1, 'Only valid ORCID returned');
+    assert(resInvalid.invalidCount === 2, 'Invalid format and check digits captured and counted');
+
+    // 16g: Empty text
+    const resEmpty = OA.parseOrcidsFromCsvOrText('');
+    assert(resEmpty.totalFound === 0, 'Empty string returns totalFound 0');
+
+    // ==========================================
+    // Test 17: Destination Libraries (Groups & Collections) Discovery & Assignment
+    // ==========================================
+    console.log('\n-- Group Library & Collection Destination Tests --');
+    assert(typeof OA.getAvailableDestinations === 'function', 'getAvailableDestinations exists on plugin');
+    assert(typeof OA.getTargetLibraryName === 'function', 'getTargetLibraryName exists on plugin');
+    assert(typeof OA.getTargetCollectionName === 'function', 'getTargetCollectionName exists on plugin');
+
+    // Mock Zotero.Libraries & Zotero.Collections
+    const mockGroupLibs = [
+      { id: 1, name: 'My Library', libraryType: 'user', isUser: true },
+      { id: 10, name: 'IIT Delhi Research Group', libraryType: 'group', isGroup: true },
+      { id: 25, name: 'AI & Robotics Lab', libraryType: 'group', isGroup: true }
+    ];
+    const mockCollections = {
+      1: [{ id: 101, name: 'Thesis Papers' }],
+      10: [{ id: 201, name: 'Journal Publications' }, { id: 202, name: 'Conference Proceedings' }],
+      25: [{ id: 301, name: 'Deep Learning' }]
+    };
+
+    sandbox.Zotero.Libraries = {
+      userLibraryID: 1,
+      getAll: () => mockGroupLibs,
+      getName: (libID) => mockGroupLibs.find(l => l.id === libID)?.name || null
+    };
+    sandbox.Zotero.Collections = {
+      getByLibrary: (libID) => mockCollections[libID] || []
+    };
+
+    const dests = OA.getAvailableDestinations();
+    assert(dests.libraries.length === 3, 'Discovered 3 libraries (1 personal, 2 groups)');
+    assert(dests.libraries[0].name === 'My Library' && dests.libraries[0].isUser === true, 'Library 1 is User Library');
+    assert(dests.libraries[1].name === 'IIT Delhi Research Group' && dests.libraries[1].isGroup === true, 'Library 10 is Group Library');
+    assert(dests.libraries[1].collections.length === 2, 'Group Library 10 has 2 collections');
+    assert(dests.libraries[1].collections[0].name === 'Journal Publications', 'Collection 201 resolved correctly');
+
+    const libName = OA.getTargetLibraryName(10);
+    assert(libName === 'IIT Delhi Research Group', 'getTargetLibraryName resolves Group Library name');
+
+    const colName = OA.getTargetCollectionName(10, 201);
+    assert(colName === 'Journal Publications', 'getTargetCollectionName resolves Collection name in Group Library');
+
+    // Test importing publication with targetLibraryID (Group) and targetCollectionID
+    const sampleWork = {
+      title: 'Group Collaborative Research',
+      authors: ['Sharma, R.'],
+      year: '2023',
+      doi: '10.1000/group.test.1'
+    };
+    OA.mockLibraryItemsByLibraryID = { 10: [] };
+    const groupImportRes = await OA.importPublications([sampleWork], 10, 201);
+    assert(groupImportRes.success === true, 'importPublications into Group Library succeeded');
+    assert(groupImportRes.imported === 1, 'Successfully imported 1 item');
+    assert(groupImportRes.importedItems[0].libraryID === 10, 'Imported item assigned to Group Library 10');
+    assert(groupImportRes.importedItems[0].collections.includes(201), 'Imported item added to collection 201 in Group Library');
+
+    // ==========================================
+    // Test 18: Batch Processing & Intra-Batch Duplicate Detection
+    // ==========================================
+    console.log('\n-- Batch Processing & Intra-Batch Duplicate Tests --');
+    const sharedWorkAlice = {
+      title: 'Joint Breakthrough Study',
+      authors: ['Alice Smith', 'Bob Jones'],
+      year: '2023',
+      doi: '10.1000/joint.study',
+      researcherName: 'Dr. Alice Smith',
+      researcherOrcid: '0000-0002-1825-0097'
+    };
+    const sharedWorkBob = {
+      title: 'Joint Breakthrough Study',
+      authors: ['Alice Smith', 'Bob Jones'],
+      year: '2023',
+      doi: '10.1000/joint.study',
+      researcherName: 'Dr. Bob Jones',
+      researcherOrcid: '0000-0002-1694-233X'
+    };
+    const uniqueWorkBob = {
+      title: 'Bob Solo Study',
+      authors: ['Bob Jones'],
+      year: '2024',
+      doi: '10.1000/bob.solo',
+      researcherName: 'Dr. Bob Jones',
+      researcherOrcid: '0000-0002-1694-233X'
+    };
+
+    // First annotate against empty local library
+    const batchAnnotated = OA.detectDuplicates([sharedWorkAlice, sharedWorkBob, uniqueWorkBob], []);
+    assert(batchAnnotated[0].duplicateStatus === 'New', 'Alice joint paper is initially New');
+
+    // Intra-batch duplicate check logic simulation
+    const seenDois = new Map();
+    for (const w of batchAnnotated) {
+      const normDoi = OA.normalizeDoi(w.doi);
+      if (normDoi) {
+        if (seenDois.has(normDoi)) {
+          w.duplicateStatus = 'Already in Zotero';
+          w.matchReason = `Intra-batch duplicate: already fetched for ${seenDois.get(normDoi).researcherName}`;
+        } else {
+          seenDois.set(normDoi, w);
+        }
+      }
+    }
+    assert(batchAnnotated[0].duplicateStatus === 'New', 'First occurrence of joint paper remains New');
+    assert(batchAnnotated[1].duplicateStatus === 'Already in Zotero', 'Second occurrence of joint paper marked Already in Zotero');
+    assert(batchAnnotated[1].matchReason.includes('Intra-batch duplicate: already fetched for Dr. Alice Smith'), 'Match reason explains intra-batch duplicate');
+    assert(batchAnnotated[2].duplicateStatus === 'New', 'Bob solo paper remains New');
+
+    // ==========================================
+    // Test 19: Duplicate Report Popup Tests
+    // ==========================================
+    console.log('\n-- Duplicate Report Popup UI Tests --');
+    assert(typeof OA.showDuplicateReportPopup === 'function', 'showDuplicateReportPopup exists on plugin');
+
+    let reportExcludedCalled = false;
+    let reportReviewCalled = false;
+    const testReportData = {
+      duplicates: [
+        {
+          title: 'Joint Breakthrough Study',
+          authors: ['Alice Smith', 'Bob Jones'],
+          year: '2023',
+          doi: '10.1000/joint.study',
+          researcherName: 'Dr. Bob Jones',
+          duplicateStatus: 'Already in Zotero',
+          matchReason: 'Intra-batch duplicate: already fetched for Dr. Alice Smith'
+        }
+      ],
+      profilesCount: 2,
+      libraryName: 'IIT Delhi Research Group',
+      onReview: () => { reportReviewCalled = true; },
+      onExcludeDuplicates: () => { reportExcludedCalled = true; }
+    };
+
+    OA.showDuplicateReportPopup(domModalWindow, testReportData);
+    const popupEl = domModalWindow.document.getElementById('orcid-duplicate-report-overlay');
+    assert(popupEl !== null, 'showDuplicateReportPopup rendered popup overlay in DOM');
+
+    // Clean up popup
+    OA.removeFromWindow(domModalWindow);
+    assert(domModalWindow.document.getElementById('orcid-duplicate-report-overlay') === null, 'removeFromWindow cleaned up duplicate report overlay');
+
+    // ==========================================
+    // Test 20: Batch Import Modal Lifecycle & Controls Tests
+    // ==========================================
+    console.log('\n-- Batch Import Modal Lifecycle Tests --');
+    assert(typeof OA.showBatchImportModal === 'function', 'showBatchImportModal exists on plugin');
+    assert(typeof OA.onBatchMenuItemCommand === 'function', 'onBatchMenuItemCommand exists on plugin');
+
+    OA.showBatchImportModal(domModalWindow);
+    const batchOverlay = domModalWindow.document.getElementById('orcid-assistant-batch-modal-overlay');
+    assert(batchOverlay !== null, 'showBatchImportModal rendered batch modal in DOM');
+
+    const batchLibSelect = domModalWindow.document.getElementById('orcid-batch-library-select');
+    assert(batchLibSelect !== null, 'Destination Library / Group selector present in batch modal');
+
+    const batchColSelect = domModalWindow.document.getElementById('orcid-batch-collection-select');
+    assert(batchColSelect !== null, 'Target Collection selector present in batch modal');
+
+    const batchTextarea = domModalWindow.document.getElementById('orcid-batch-textarea');
+    assert(batchTextarea !== null, 'Batch CSV textarea present');
+
+    const fetchBtn = domModalWindow.document.getElementById('orcid-batch-fetch-btn');
+    assert(fetchBtn !== null, 'Fetch Publications button present');
+
+    // Clean up batch modal
+    OA.removeFromWindow(domModalWindow);
+    assert(domModalWindow.document.getElementById('orcid-assistant-batch-modal-overlay') === null, 'removeFromWindow cleaned up batch modal overlay');
+
+    // ==========================================
     // Test 16: Strict ORCID Read-Only & Zero Write API Verification
     // ==========================================
     console.log('\n-- Step 4: Strict ORCID Read-Only & Zero Write Scope Verification --');
@@ -1126,6 +1370,8 @@ try {
 
     const menuItemAfterShutdown = mockWindow.document.getElementById('orcid-assistant-tools-menuitem');
     assert(menuItemAfterShutdown === null, 'Menu item cleanly removed from DOM on shutdown');
+    const batchMenuItemAfterShutdown = mockWindow.document.getElementById('orcid-assistant-tools-batch-menuitem');
+    assert(batchMenuItemAfterShutdown === null, 'Batch menu item cleanly removed from DOM on shutdown');
     assert(sandbox.ORCIDAssistant === undefined, 'ORCIDAssistant singleton is unset on shutdown');
 
     // ==========================================

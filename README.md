@@ -1,18 +1,15 @@
 # ORCID Assistant for Zotero 7+
 
-**ORCID Assistant** is an open-source Zotero desktop plugin designed to streamline importing, verifying, and linking researcher publication records from [ORCID](https://orcid.org) directly into your local Zotero library.
+**ORCID Assistant** is an open-source Zotero desktop plugin designed to streamline importing, verifying, and linking researcher publication records from [ORCID](https://orcid.org) directly into your local Zotero library, Group Libraries, and Collections.
 
-> **Step 4.1 Implementation Status: Robust Bibliographic Metadata Enrichment and Reliable Zotero Import**  
-> Builds on the verified Step 1 lifecycle, Step 2 local helper service, Step 3 duplicate detection engine, and Step 4 selected-publication import:
-> * **Root-Cause Resolution for Incomplete Metadata**: Solved missing author, journal, volume, issue, and page details caused by ORCID's `/works` summary endpoint omitting contributors and field metadata.
-> * **Bulk ORCID Work Detail Retrieval**: Fetches complete work records via the official ORCID Public API v3.0 bulk endpoint (`GET /v3.0/{orcid}/works/{putCodes}`, up to 50 items per request) to retrieve detailed contributors, full journal titles, BibTeX citations, and external IDs.
-> * **Public Crossref API Integration**: Automatically queries Crossref (`https://api.crossref.org/works/{doi}`) using a polite User-Agent to retrieve publisher-authoritative metadata: structured author given/family names, full `container-title`, `journalAbbreviation`, `volume`, `issue`, `page`/article-number, `ISSN`, `publisher`, canonical `URL`, and cleaned abstracts.
-> * **Strict Source Precedence Rules**: Merges ORCID details, Crossref records, and BibTeX citations with strict precedence (Crossref > ORCID Detail > BibTeX > ORCID Summary) while strictly verifying that Crossref response DOIs match requested DOIs.
-> * **Complete Zotero Item Field Mapping**: Correctly maps fields across all major item types (`journalArticle`, `book`, `bookSection`, `conferencePaper`, `report`, `thesis`, `preprint`, `dataset`, `patent`). Guarantees journal titles map to `publicationTitle` and never `publisher`!
-> * **Structured Creator Management**: Builds official Zotero `creators` arrays with separated `firstName` and `lastName`, while preserving institutional and organizational authors with `fieldMode: 1`.
-> * **Metadata Quality & Source Transparency**: Displays real-time metadata quality indicators in preview cards (`[ORCID + Crossref]`, enriched fields, missing fields) so users inspect data completeness before importing.
-> * **Strict ORCID Read-Only Guarantee**: Writes strictly to the user's local Zotero library; zero ORCID write scopes requested, zero push/edit/delete operations on ORCID.
-> * **Isolated Local Architecture**: Credentials remain in `.env` on localhost (`127.0.0.1:23125`); `dist/orcid-assistant.xpi` contains zero credentials and zero helper code.
+> **Feature Highlight: Batch CSV Import, Group Library & Collection Targeting, and Duplicate Notification**
+> * **Batch CSV / TSV & ORCID List Upload**: Import dozens of researcher profiles in a single operation. Upload a `.csv` / `.tsv` file or paste researcher names and ORCIDs directly.
+> * **Destination Selection (Group Libraries & Collections)**: Select whether to import into personal "My Library" or any Zotero **Group Library**, and optionally target a specific **Collection** within that library. Duplicate checking automatically re-evaluates against the chosen destination library.
+> * **Intra-Batch & Local Duplicate Detection**: Checks publications against existing records in the destination library as well as co-authored papers across researchers in the same batch.
+> * **Duplicate Notification Popup**: Automatically surfaces a dedicated report popup whenever duplicate publications are detected, detailing the match reasons and offering one-click duplicate exclusion or item-by-item review.
+> * **Robust Metadata Enrichment**: Combines ORCID Public API v3.0 bulk work details with publisher-authoritative Crossref metadata.
+> * **Strict Read-Only Guarantee**: Zero write scopes to ORCID; writes strictly to the user's chosen local Zotero personal or group library.
+> * **Isolated Local Architecture**: Credentials remain in an ignored `.env` file on localhost (`127.0.0.1:23125`); `dist/orcid-assistant.xpi` contains zero credentials.
 
 ---
 
@@ -276,11 +273,33 @@ npm test
   * Modal overlay rendering and cleanup via `removeFromWindow`.
   * Default selection state (`New` checked; `Already in Zotero` and `Possible Duplicate` unchecked).
   * Live selection summary count updates (`X of Y selected`).
+* **Batch CSV / TSV Parsing & Extraction**:
+  * Standard CSV with headers (`Name, Department, ORCID`).
+  * Tab-separated (TSV) and semicolon-delimited files.
+  * Plain unformatted lists of ORCIDs with and without `https://orcid.org/` prefixes.
+  * In-file duplicate ORCID deduplication with name retention.
+  * Invalid format and checksum rejection with error counting.
+* **Destination Libraries (Personal & Groups) & Collections**:
+  * `getAvailableDestinations` discovering personal and all Group Libraries (`Zotero.Libraries.getAll()`).
+  * Collection discovery per library (`Zotero.Collections.getByLibrary()`).
+  * Dynamic duplicate re-checking when target destination library is changed.
+  * Item creation and assignment into target Group Library and specific Collection (`item.addToCollection()`).
+* **Intra-Batch Duplicate Prevention**:
+  * Co-authored publications between researchers in the same batch are detected.
+  * First occurrence remains `New`; subsequent occurrences are flagged as duplicates with intra-batch attribution.
+* **Duplicate Notification Popup & Batch Modal**:
+  * Dedicated `showDuplicateReportPopup` dialog surfacing detected duplicates with match reasons.
+  * One-click "Exclude All Duplicates" or "Review Publications".
+  * Full interactive batch modal (`showBatchImportModal`) with file upload, paste box, live parser, progress bar, and selective import.
+  * Dual Tools menu registration (`ORCID Assistant` and `ORCID Assistant — Batch CSV Import...`).
+  * Clean shutdown removing both menu items and active overlays.
 * **Security & Non-Interference**:
   * Helper service requests strictly `/read-public` scope (zero `/activities/update`, zero `/read-limited`).
   * Helper service issues strictly `GET` requests for works; zero `PUT` or `DELETE` requests.
   * Plugin issues zero `POST`, `PUT`, or `DELETE` requests to ORCID.
   * XPI archive verification: strictly excludes `.env`, helper service files, and client credentials.
+
+### Total Automated Test Coverage: 402 Passing Assertions (300 Plugin + 102 Helper)
 
 ### Helper Service & Enrichment Verification (`helper-service/test.js` - 102 Tests)
 * **ORCID Validation**: ISO 7064 check digit validation unit tests.
